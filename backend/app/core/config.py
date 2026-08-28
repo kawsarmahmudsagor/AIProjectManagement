@@ -34,6 +34,13 @@ class Settings(BaseSettings):
     ollama_extraction_fallback_model: str = "gemma4:e2b"
     gemini_default_model: str = "gemini-3.5-flash"
 
+    # Jarvis's github_search tool (app/agents/chat_tools.py). A single shared app-level
+    # token, not per-user — if unset, the tool still works but degrades to GitHub's
+    # unauthenticated rate limit (10 req/min to /search/*) rather than hard-failing.
+    github_token: str | None = None
+    github_min_stars: int = 200
+    github_freshness_months: int = 12
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

@@ -803,3 +803,87 @@ No codebase exists yet. These are the files this research says to create first, 
 - `C:\Users\BS23-DESKTOP-00038\Projects\AIProjectManagement\app\render\` — `docx.py` (python-docx + html-for-docx) and `pdf.py` (`PdfRenderer` protocol, Playwright backend with a lifespan-shared browser, WeasyPrint backend behind a flag).
 
 **Sources:** [Gemini API libraries](https://ai.google.dev/gemini-api/docs/libraries) · [deprecated-generative-ai-python](https://github.com/google-gemini/deprecated-generative-ai-python) · [python-genai](https://github.com/googleapis/python-genai) · [Gemini models](https://ai.google.dev/gemini-api/docs/models) · [Gemini pricing](https://ai.google.dev/gemini-api/docs/pricing) · [Structured outputs](https://ai.google.dev/gemini-api/docs/structured-output) · [Structured outputs blog](https://blog.google/innovation-and-ai/technology/developers-tools/gemini-api-structured-outputs/) · [Document processing](https://ai.google.dev/gemini-api/docs/document-processing) · [Files API](https://ai.google.dev/gemini-api/docs/files) · [Rate limits](https://ai.google.dev/gemini-api/docs/rate-limits) · [Using Gemini API keys](https://ai.google.dev/gemini-api/docs/api-key) · [Restrict keys by June 19](https://discuss.ai.google.dev/t/action-required-restrict-gemini-api-keys-by-june-19-to-avoid-service-disruption/171786) · [Gemini API terms](https://ai.google.dev/gemini-api/terms) · [Interactions API overview](https://ai.google.dev/gemini-api/docs/interactions-overview) · [Interactions GA blog](https://blog.google/innovation-and-ai/technology/developers-tools/interactions-api-general-availability/) · [Migrate to Interactions](https://ai.google.dev/gemini-api/docs/migrate-to-interactions) · [What's new in 3.7 Flash](https://ai.google.dev/gemini-api/docs/latest-model) · [python-genai #1039](https://github.com/googleapis/python-genai/issues/1039) · [python-genai #782](https://github.com/googleapis/python-genai/issues/782) · [python-genai #1875](https://github.com/googleapis/python-genai/issues/1875) · [Ollama structured outputs](https://docs.ollama.com/capabilities/structured-outputs) · [Ollama authentication](https://docs.ollama.com/api/authentication) · [Ollama Cloud](https://docs.ollama.com/cloud) · [Cloud models blog](https://ollama.com/blog/cloud-models) · [Ollama FAQ](https://docs.ollama.com/faq) · [Ollama API reference](https://github.com/ollama/ollama/blob/main/docs/api.md) · [ollama #14073](https://github.com/ollama/ollama/issues/14073) · [ollama #13206](https://github.com/ollama/ollama/issues/13206) · [ollama #13967](https://github.com/ollama/ollama/issues/13967) · [openclaw #4028](https://github.com/openclaw/openclaw/issues/4028) · [Ollama silent truncation](https://repofold.dev/blog/ollama-silently-truncates-your-prompts) · [qwen3.5 library](https://ollama.com/library/qwen3.5) · [gemma4 library](https://ollama.com/library/gemma4) · [PyMuPDF licensing](https://pymupdf.readthedocs.io/en/latest/about.html) · [pdfmux benchmark](https://pdfmux.com/blog/pymupdf-vs-pdfplumber/) · [Docling install](https://docling-project.github.io/docling/getting_started/installation/) · [html4docx repo](https://github.com/dfop02/html4docx) · [WeasyPrint first steps](https://doc.courtbouillon.org/weasyprint/stable/first_steps.html) · [PDF4.dev HTML→PDF benchmark](https://pdf4.dev/blog/html-to-pdf-benchmark-2026) · [wkhtmltopdf alternatives](https://pdf4.dev/blog/wkhtmltopdf-alternatives-2026) · [Celery on Windows](https://celery.school/celery-on-windows) · [Celery concurrency](https://docs.celeryq.dev/en/stable/userguide/concurrency/) · [SAQ](https://github.com/tobymao/saq) · [Task queue comparison 2026](https://aleksul.space/posts/choosing-python-task-queue-library/) · [Redis on Windows with Memurai](https://redis.io/tutorials/howtos/how-to-run-redis-on-windows-natively-with-memurai/) · [Redis–Memurai partnership](https://www.memurai.com/blog/redis-partners-with-memurai)
+
+---
+
+# E. Jarvis (chatbot) — LangGraph tool-calling, streaming, GitHub search
+
+Written after implementing and **live-testing** the chatbot feature (2026-08-28) against a
+real local Ollama instance and the real GitHub REST API — this is verified-by-execution,
+not documentation research, unlike most of A–D above.
+
+## E1. Ollama tool-calling — ✅ CONFIRMED WORKING
+
+The single biggest open risk flagged at design time was whether `langchain-ollama`'s
+`ChatOllama.bind_tools()` actually produces usable `tool_calls`, or silently narrates them
+as text instead. Tested live against `gemma4:e2b` (this app's own default local model) via
+the full LangGraph agent loop (`app/agents/chatbot_graph.py`):
+
+- `ollama --version`'s own `/api/tags` capability tags confirm `gemma4:e2b`, `gemma4:e4b`,
+  and every `-cloud` model tested (`gemma4:31b-cloud`, `qwen3-vl:235b-cloud`,
+  `minimax-m3:cloud`) list `"tools"` in their `capabilities` array — this is a reliable,
+  cheap pre-flight check (`GET /api/tags`, inspect `models[].capabilities`) worth adding to
+  the Settings UI later to warn if a user picks a model that doesn't declare it.
+- End-to-end: asked "What projects have I worked on that use FastAPI?" with a real saved
+  project — the model correctly emitted a `project_search` tool call with the right args
+  (`{"technologies": ["FastAPI"]}`), the ReAct loop executed it, and the final answer
+  correctly cited only the tool-returned project (no hallucination).
+- Asked a general "recommend a well-maintained Python RAG library" question — the model
+  correctly called `github_search` instead of `project_search` (correct mode selection
+  purely from the system prompt's grounding rules, no hand-rolled intent routing), and the
+  final answer accurately summarized the real returned repos (langchain, haystack,
+  langgraph, pathway) with correct star-ordering.
+- Full message-row persistence (`chat_messages`) round-tripped correctly: `AIMessage` with
+  `tool_calls` → `ToolMessage` with matching `tool_call_id`/structured `tool_result` →
+  final `AIMessage` with plain text, in the right order, ready for replay.
+
+**Conclusion: no Ollama-specific fallback (prompted-JSON-tool-call, Gemini-only chat) is
+needed** — the originally-planned contingency in the design doc turned out to be
+unnecessary for the models this app already defaults to. Still verify per-model if a user
+picks an unusual Ollama model — the capability tag check above is the fast way to do that
+before relying on tool-calling for it.
+
+## E2. `astream_events` event names used — verified against the installed versions
+
+`app/agents/chatbot_graph.stream_chat` listens for `on_chat_model_stream` (token deltas),
+`on_chat_model_end` (final `AIMessage`), `on_tool_start`, and `on_tool_end` — all four fired
+correctly and in the right order in the live test above, against whatever
+`langgraph`/`langchain-core` versions `uv.lock` pins today. `run_id` (not the model's own
+`tool_call_id`) is used to correlate `tool_start`↔`tool_end` for the SSE wire contract,
+since it's guaranteed present at `tool_start` time before any `ToolMessage` exists yet —
+this held up correctly with multiple sequential tool calls in testing.
+
+## E3. `response_format="content_and_artifact"` on `@tool`
+
+Confirmed `ToolMessage.artifact` survives the round-trip through `on_tool_end`'s event data
+and is exactly the structured dict each tool returns (verified: a `github_search` tool
+result's `artifact` was the real `{"repos": [...], "query_used": ...}` dict, not a
+stringified/re-parsed copy) — this is what lets the frontend render rich repo cards and
+what gets persisted verbatim to `chat_messages.tool_result` (JSONB).
+
+## E4. GitHub REST Search API — observed behavior (unauthenticated, no `GITHUB_TOKEN` set)
+
+- `q=<query> in:name,description,topics stars:>=200 archived:false pushed:>=<cutoff>` with
+  `sort=stars&order=desc` returned real, current, high-quality results in the live test
+  (langchain-ai/langchain at 145k stars, down to raga-ai-hub/RagaAI-Catalyst at 16k) —
+  the star/freshness/archived filter combination works as designed.
+- Unauthenticated rate limit (10 req/min to `/search/*`) was not hit during light manual
+  testing, but will be under real multi-user load — as already flagged, a `GITHUB_TOKEN`
+  should be configured for anything beyond local dev (raises the shared pool to 5,000/hr
+  per GitHub's docs — re-verify that exact number against
+  [GitHub's rate limit docs](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api)
+  before depending on it in production, since this session didn't test the authenticated
+  path).
+- **Not verified**: GitHub Search's secondary/abuse rate limit behavior (stricter than the
+  primary limit, undocumented exact thresholds) — worth a dedicated check before assuming
+  the app is safe under concurrent multi-user chat traffic.
+
+## E5. Still open / not covered by this pass
+
+- `docs/RESEARCH.md`'s existing §B UNVERIFIED note about `qwen3.5`'s missing tool-calling
+  tag is superseded for this app's own default models (§E1 above), but remains open for
+  any Ollama model a user might configure that isn't `gemma4:*`.
+- Load/concurrency behavior of the SSE endpoint (`StreamingResponse` under many concurrent
+  chat turns) was not tested — only single-request manual verification.
+- Whether any reverse proxy in the actual deployment target buffers `text/event-stream`
+  responses (breaking live streaming) — untested outside local `uvicorn`.

@@ -12,6 +12,7 @@ from app.core.security import (
     hash_password,
     verify_password,
 )
+from app.models.profile import UserProfile
 from app.models.user import User
 from app.schemas.auth import (
     AuthResponse,
@@ -31,8 +32,19 @@ async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db))
     if await get_user_by_email(db, payload.email):
         raise HTTPException(status.HTTP_409_CONFLICT, "An account with that email already exists")
 
-    user = User(email=payload.email, hashed_password=hash_password(payload.password))
+    user = User(
+        email=payload.email,
+        hashed_password=hash_password(payload.password),
+        first_name=payload.first_name,
+        middle_name=payload.middle_name,
+        last_name=payload.last_name,
+        preferred_name=payload.preferred_name,
+    )
     db.add(user)
+    await db.flush()
+    # Every user has exactly one (initially empty) profile row from day one, so
+    # GET /profile never 404s — see models/profile.py's docstring.
+    db.add(UserProfile(user_id=user.id))
     await db.commit()
     await db.refresh(user)
 
@@ -79,8 +91,10 @@ async def me(user: User = CurrentUser) -> UserOut:
 async def update_me(
     payload: UserUpdate, user: User = CurrentUser, db: AsyncSession = Depends(get_db)
 ) -> UserOut:
-    if payload.agent_persona is not None:
-        user.agent_persona = payload.agent_persona
+    updates = payload.model_dump(exclude_unset=True, exclude_none=True)
+    if updates:
+        for field, value in updates.items():
+            setattr(user, field, value)
         await db.commit()
         await db.refresh(user)
     return UserOut.model_validate(user)

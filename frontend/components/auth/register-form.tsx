@@ -11,6 +11,7 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 
 const schema = z.object({
+  first_name: z.string().trim().min(1, "First name is required").max(80),
   email: z.string().email("Enter a valid email"),
   password: z.string().min(8, "At least 8 characters"),
 });
@@ -45,6 +46,11 @@ export function RegisterForm() {
   return (
     <Card>
       <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+        <div>
+          <label className="mb-1 block text-sm font-medium">First Name</label>
+          <Input placeholder="Your first name" {...register("first_name")} />
+          {errors.first_name && <p className="mt-1 text-xs text-danger">{errors.first_name.message}</p>}
+        </div>
         <div>
           <label className="mb-1 block text-sm font-medium">Email</label>
           <Input type="email" placeholder="you@example.com" {...register("email")} />

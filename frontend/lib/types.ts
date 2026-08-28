@@ -46,8 +46,19 @@ export type ProviderModelCatalog = { models: string[]; default: string };
 export type ProviderModelCatalogResponse = Record<"gemini" | "ollama", ProviderModelCatalog>;
 
 export type AgentPersona = "business_analyst" | "technical_developer";
+export type ChatProvider = "gemini" | "ollama";
 
-export type UserOut = { id: string; email: string; agent_persona: AgentPersona };
+export type UserOut = {
+  id: string;
+  email: string;
+  agent_persona: AgentPersona;
+  first_name: string;
+  middle_name: string | null;
+  last_name: string | null;
+  preferred_name: string | null;
+  chat_provider: ChatProvider;
+  chatbot_preemptive_github_suggestions: boolean;
+};
 
 export type UploadResponse = { document_id: string; job_id: string };
 

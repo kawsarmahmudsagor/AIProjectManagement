@@ -1,13 +1,17 @@
 "use client";
 
-import { ChevronLeft, LayoutDashboard, Settings, LogOut } from "lucide-react";
+import { ChevronLeft, LayoutDashboard, Settings, LogOut, UserRound } from "lucide-react";
 import Link from "next/link";
 import { useRouter, usePathname } from "next/navigation";
 import { useState } from "react";
+import { ChatWidget } from "@/components/chat/chat-widget";
 import { ProjectsNavSection } from "@/components/layout/projects-nav-section";
 import { cn } from "@/lib/utils";
 
-const NAV_TOP = [{ href: "/dashboard", label: "Dashboard", icon: LayoutDashboard }];
+const NAV_TOP = [
+  { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
+  { href: "/profile", label: "Profile", icon: UserRound },
+];
 const NAV_BOTTOM = [{ href: "/settings/ai-providers", label: "Settings", icon: Settings }];
 
 function NavLink({
@@ -54,21 +58,12 @@ export function AppShell({ email, children }: { email: string; children: React.R
     <div className="flex min-h-screen">
       <aside
         className={cn(
-          "flex shrink-0 flex-col border-r border-border bg-surface p-4 transition-[width] duration-200",
+          "sticky top-0 flex h-screen shrink-0 flex-col border-r border-border bg-surface p-4 transition-[width] duration-200",
           collapsed ? "w-16" : "w-60",
         )}
       >
-        <div className={cn("mb-8 flex items-center", collapsed ? "justify-center" : "justify-between px-2")}>
+        <div className={cn("mb-8 flex items-center", collapsed ? "justify-center" : "px-2")}>
           {!collapsed && <span className="text-sm font-semibold">AI Project Management</span>}
-          <button
-            type="button"
-            onClick={() => setCollapsed((v) => !v)}
-            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-            aria-expanded={!collapsed}
-            className="rounded-lg p-1.5 text-muted hover:bg-surface-2 hover:text-foreground"
-          >
-            <ChevronLeft size={16} className={cn("transition-transform", collapsed && "rotate-180")} />
-          </button>
         </div>
         <nav className="flex-1 space-y-1">
           {NAV_TOP.map((item) => (
@@ -80,7 +75,16 @@ export function AppShell({ email, children }: { email: string; children: React.R
           ))}
         </nav>
         <div className="border-t border-border pt-3">
-          {!collapsed && <p className="truncate px-2 text-center text-xs text-muted">{email}</p>}
+          <button
+            type="button"
+            onClick={() => setCollapsed((v) => !v)}
+            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            aria-expanded={!collapsed}
+            className="flex w-full items-center justify-center rounded-lg p-1.5 text-muted hover:bg-surface-2 hover:text-foreground"
+          >
+            <ChevronLeft size={16} className={cn("transition-transform", collapsed && "rotate-180")} />
+          </button>
+          {!collapsed && <p className="mt-1 truncate px-2 text-center text-xs text-muted">{email}</p>}
           <button
             onClick={logout}
             title="Log out"
@@ -92,6 +96,7 @@ export function AppShell({ email, children }: { email: string; children: React.R
         </div>
       </aside>
       <main className="flex-1 p-8">{children}</main>
+      <ChatWidget />
     </div>
   );
 }

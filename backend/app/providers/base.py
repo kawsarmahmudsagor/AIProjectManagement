@@ -5,6 +5,7 @@ google-genai or ollama directly, so swapping/adding a provider never touches cal
 
 from typing import Protocol
 
+from langchain_core.language_models import BaseChatModel
 from pydantic import BaseModel
 
 from app.models.user import AgentPersona
@@ -69,3 +70,10 @@ class LLMProvider(Protocol):
         ...
 
     async def test_connection(self) -> ConnectionStatus: ...
+
+    def get_chat_model(self) -> BaseChatModel:
+        """The underlying LangChain chat model, configured for open-ended conversation +
+        tool-calling + streaming — no structured-output binding (that's extract()'s job).
+        This is the one seam where agents/chatbot_graph.py reaches below the
+        extract()/rewrite() abstraction to call .bind_tools()/.astream_events() directly."""
+        ...

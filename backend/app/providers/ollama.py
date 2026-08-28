@@ -44,6 +44,10 @@ _DEFAULT_NUM_CTX = 8192
 _MAX_NUM_CTX = 65536
 _EXTRACT_NUM_PREDICT = 16384
 _REWRITE_NUM_PREDICT = 2048
+_CHAT_NUM_PREDICT = 2048
+# Chat conversations carry more history than a single rewrite call, so give the context
+# window more headroom than _DEFAULT_NUM_CTX by default.
+_CHAT_NUM_CTX = 16384
 
 
 def _next_pow2(n: int) -> int:
@@ -174,6 +178,10 @@ class OllamaProvider(LLMProvider):
         if not response.content:
             raise ProviderError("EMPTY_RESPONSE", "Ollama returned no content", retryable=True)
         return str(response.content).strip()
+
+    def get_chat_model(self) -> ChatOllama:
+        # No format= — chat is free text, not JSON-schema-constrained like extract().
+        return self._chat(num_ctx=_CHAT_NUM_CTX, num_predict=_CHAT_NUM_PREDICT, temperature=0.4)
 
     async def test_connection(self) -> ConnectionStatus:
         try:

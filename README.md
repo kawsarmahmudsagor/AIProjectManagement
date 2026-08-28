@@ -2,7 +2,10 @@
 
 Upload a project document → AI extracts a structured project entry → you review and
 edit → export to PDF/DOCX. Multi-user, dark-themed, two swappable AI providers
-(Gemini and local Ollama).
+(Gemini and local Ollama). Includes **Jarvis**, an agentic chatbot that answers questions
+about your own project portfolio, analyzes cross-project technology patterns, and
+recommends real, well-maintained GitHub repositories — plus an optional CV-style
+Profile page.
 
 ## Stack
 
@@ -11,11 +14,13 @@ edit → export to PDF/DOCX. Multi-user, dark-themed, two swappable AI providers
 | Backend | Python 3.11+, FastAPI (async), SQLAlchemy 2.0 (async) + Alembic, PostgreSQL |
 | Frontend | Next.js 16 (App Router, TS), Tailwind CSS v4, shadcn/ui (Base UI), Tiptap |
 | Job queue | [SAQ](https://github.com/tobymao/saq) on the **Postgres** backend — no Redis needed on Windows dev |
-| AI providers | Google Gemini and local Ollama, orchestrated via **LangChain** (`langchain-google-genai`, `langchain-ollama`); the rewrite path also runs through a **LangGraph** `StateGraph` (`app/agents/rewrite_graph.py`), the seed for a planned chatbot feature. **Billing required on Gemini** — see below |
+| AI providers | Google Gemini and local Ollama, orchestrated via **LangChain** (`langchain-google-genai`, `langchain-ollama`); the rewrite path runs through a **LangGraph** `StateGraph` (`app/agents/rewrite_graph.py`), and Jarvis runs through a second, tool-calling LangGraph agent (`app/agents/chatbot_graph.py`). **Billing required on Gemini** — see below |
 | Agent persona | Per-user "Business Analyst" (default) or "Technical Developer" system-prompt persona, configurable in Settings > AI Providers — swaps how extraction and "Enhance with AI" write the same facts, never what they invent |
+| Jarvis (chatbot) | Real LLM tool-calling agent (`project_search`, `portfolio_analysis`, `github_search`) with a persisted, streamed (SSE) chat, floating bottom-right on every authenticated page. Grounds anything about the user's own projects in tool results only — never invents them — and separately can use general knowledge + a live GitHub search for technology recommendations. Configurable per-user provider (Gemini/Ollama) and a "preemptive suggestions" toggle in Settings > Chatbot. See `docs/RESEARCH.md` §E for live-verified findings (incl. Ollama tool-calling) |
+| Profile page | Optional CV-style profile (`/profile`): photo, name, designation/team/organization, skills, speciality, and five AI-enhanced bio sections (Professional Biography, Work Experience Summary, Career Objective, Key Strengths, Responsibilities). Entirely optional — Jarvis works fully without it, and only uses filled-in fields as soft context for GitHub recommendations, never as a verified fact or in its greeting |
 | Document parsing | `pdfplumber`, `docx2python`, `python-docx`, `mammoth` |
 | Export | `html-for-docx` (DOCX), Playwright/Chromium (PDF) |
-| Auth | JWT access + refresh tokens issued by FastAPI; Next.js BFF stores them as httpOnly cookies (browser never sees a token) |
+| Auth | JWT access + refresh tokens issued by FastAPI; Next.js BFF stores them as httpOnly cookies (browser never sees a token). Registration requires a first name (used for Jarvis's greeting) |
 
 See `frontend/DESIGN.md` and `backend/DESIGN.md` for the full architecture writeups,
 and `docs/RESEARCH.md` for the verified (Aug 2026) integration facts behind the
@@ -26,7 +31,7 @@ it covers a Gemini API key deadline landing this month.
 
 ```
 backend/    FastAPI service — app/, alembic/, tests/
-frontend/   Next.js app — src/app, src/components, src/features
+frontend/   Next.js app — app/, components/, hooks/, lib/
 docs/       RESEARCH.md (provider/library facts), architecture notes
 docker-compose.yml   Postgres for local dev
 ```
@@ -61,6 +66,20 @@ docker-compose.yml   Postgres for local dev
    user hasn't touched (`keepDirtyValues` semantics); the per-field "Enhance"/"Generate
    from long" buttons return a suggestion into a review panel that requires an explicit
    Accept. See `frontend/DESIGN.md` §4.4 — this is the most important UX rule in the app.
+8. **Jarvis is grounded-first, not a generic chat assistant.** Its system prompt
+   (`app/providers/prompts.py`) draws a hard line: any claim about the user's own
+   projects must come from a `project_search`/`portfolio_analysis` tool call in that
+   conversation, never invented; only genuinely general technology questions may use the
+   model's own knowledge, grounded further by a live `github_search` call rather than a
+   possibly-stale remembered repo. The "preemptive suggestions" Settings toggle changes
+   *whether Jarvis may volunteer* a GitHub suggestion unprompted — it never changes
+   *what's allowed to be true* in an answer.
+9. **The GitHub search tool uses a real quality bar, not just a keyword match** —
+   minimum stars, `archived:false`, and a rolling freshness window (`pushed:>=`), all
+   configurable via `GITHUB_MIN_STARS`/`GITHUB_FRESHNESS_MONTHS` — so recommendations are
+   real, current, and not dead forks. See `docs/RESEARCH.md` §E for the live-tested
+   results (incl. confirming Ollama's `gemma4:e2b`/`e4b` do real tool-calling, not just
+   narrated text).
 
 ## Getting started
 
@@ -87,6 +106,8 @@ cd backend
 python -m venv .venv && .venv\Scripts\activate
 pip install -e ".[dev]"
 copy .env.example .env        # fill in SECRET_KEY, FERNET_KEY, DATABASE_URL (port per above)
+                               # GITHUB_TOKEN is optional (Jarvis's github_search tool
+                               # works unauthenticated too, just rate-limited harder)
 alembic upgrade head
 uvicorn app.main:app --port 8000
 ```
@@ -139,3 +160,17 @@ Not yet built: the document upload → AI extraction job-polling flow (drag-and-
 stepper, auto-filling the form from a parsed document) and the resulting AI-provenance
 tracking (which fields were AI-filled vs hand-typed, revert-to-original) — see
 `frontend/DESIGN.md` §9 milestones M6–M7.
+
+**Jarvis (chatbot) — built and live-tested end to end**, backend and frontend: a
+per-request-built LangGraph agent (`app/agents/chatbot_graph.py`) with three tools
+(`app/agents/chat_tools.py`), streamed to the browser over SSE
+(`app/routers/chat.py` → `frontend/lib/chat.ts` → `frontend/components/chat/`), with
+full history persistence (`chat_sessions`/`chat_messages`) so a reload resumes the same
+conversation without repeating the greeting. Verified live against a real local Ollama
+model (`gemma4:e2b`) and the real GitHub Search API — see `docs/RESEARCH.md` §E. Settings
+> Chatbot lets a user pick Jarvis's provider and toggle preemptive GitHub suggestions.
+
+**Profile page — built**: `/profile` (`frontend/app/(app)/profile/`, backend
+`app/routers/profile.py`), entirely optional CV-style content with the same
+propose-then-accept "Enhance with AI" pattern as the project form, adapted for its plain
+(non-rich-text) bio fields.

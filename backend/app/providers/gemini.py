@@ -112,6 +112,12 @@ class GeminiProvider(LLMProvider):
             raise ProviderError("EMPTY_RESPONSE", "Gemini returned no content", retryable=True)
         return response.text.strip()
 
+    def get_chat_model(self) -> ChatGoogleGenerativeAI:
+        # No response_mime_type/response_schema (those are extract()-only structured-
+        # output config) and a chat-appropriate max_output_tokens — replies can run longer
+        # than a rewrite snippet but shouldn't be unbounded.
+        return self._chat(thinking_level="low", max_output_tokens=4096)
+
     async def test_connection(self) -> ConnectionStatus:
         try:
             # google-genai's list-models call is the cheap, zero-token probe (docs/RESEARCH.md

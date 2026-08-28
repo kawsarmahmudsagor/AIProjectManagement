@@ -31,7 +31,7 @@ async def get_provider(
     user_id: UUID,
     provider: ProviderName | None = None,
     *,
-    purpose: Literal["extract", "rewrite"] = "rewrite",
+    purpose: Literal["extract", "rewrite", "chat"] = "rewrite",
 ) -> LLMProvider:
     """Resolve a user's configured provider. Falls back to whichever provider is marked
     `is_default`, then to Gemini, if `provider` isn't given explicitly.
@@ -40,7 +40,10 @@ async def get_provider(
     tag (e.g. the Settings page's `gemma4:31b-cloud` default), and Ollama Cloud doesn't
     support structured output (docs/RESEARCH.md §B3). Rewrite/chat have no such
     restriction, but `purpose="extract"` swaps in a local fallback model instead of
-    handing the cloud tag to OllamaProvider.extract(), which would just fail."""
+    handing the cloud tag to OllamaProvider.extract(), which would just fail.
+    `purpose="chat"` behaves identically to `"rewrite"` here — it exists as its own
+    literal so a future chat-specific model-selection nuance (e.g. a different default
+    model) doesn't require touching every call site."""
     query = select(AIProviderSetting).where(AIProviderSetting.user_id == user_id)
     rows = {row.provider: row for row in (await db.execute(query)).scalars().all()}
 
