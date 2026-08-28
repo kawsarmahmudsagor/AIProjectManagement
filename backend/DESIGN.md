@@ -43,7 +43,11 @@ backend/
     │   ├── base.py                 Protocol: extract(), rewrite(), test_connection()
     │   ├── gemini.py
     │   ├── ollama.py
+    │   ├── prompts.py              persona-keyed system prompts + rewrite prompt builder
     │   └── registry.py             resolves a user's configured provider
+    ├── agents/                    LangGraph orchestration — see §4
+    │   └── rewrite_graph.py        one-node StateGraph wrapping provider.rewrite(); the
+    │                                seam a future chatbot graph extends
     ├── ingest/
     │   └── extract.py             magic-byte sniff, pdfplumber/docx2python/mammoth, .doc reject
     ├── render/
@@ -68,7 +72,10 @@ client; the client pair is a UX convenience, not a trust boundary (see frontend 
 
 ```
 users
-  id (uuid, pk)  email (unique, citext)  hashed_password  created_at  updated_at
+  id (uuid, pk)  email (unique, citext)  hashed_password
+  agent_persona (enum: business_analyst | technical_developer, default business_analyst)
+                 -- which system prompt (providers/prompts.py) frames extraction + rewrite
+  created_at  updated_at
 
 projects
   id (uuid, pk)  user_id (fk -> users, cascade)
@@ -126,6 +133,7 @@ POST   /auth/register              {email, password}                 -> {access_
 POST   /auth/login                 {email, password}                 -> {access_token, refresh_token, user}
 POST   /auth/refresh               {refresh_token}                   -> {access_token, refresh_token}
 GET    /auth/me                                                       -> {user}
+PATCH  /auth/me            {agent_persona?: business_analyst|technical_developer} -> {user}
 
 GET    /projects            ?q=&page=&page_size=                     -> {items: [ProjectSummary], total}
 POST   /projects            ProjectCreate                             -> Project
@@ -187,6 +195,17 @@ LangChain's higher-level helpers, deliberately:
   the one seam in the backend that wasn't verified against a live call, only against
   each package's documented behavior at design time.
 
+**The rewrite path (`/ai/rewrite`) is already routed through LangGraph**
+(`app/agents/rewrite_graph.py`): a compiled `StateGraph` with one node, `call_provider`,
+that awaits `LLMProvider.rewrite(...)`. `ai_service.rewrite_field()` calls
+`run_rewrite()` (the graph's entry point) instead of the provider directly — the
+generate-then-verify-then-retry loop for the 390-char cap (below) still lives in the
+service and just calls the graph once per attempt. It's intentionally a single node
+today; it exists so the chatbot feature above extends an existing compiled graph
+(adding memory/tool-calling/routing nodes) instead of introducing orchestration for the
+first time. Extraction is **not** routed through LangGraph — it stays a direct
+`provider.extract(...)` call, since it already has its own job-status state machine (§2's
+`extraction_jobs.status`) and doesn't need a second one.
 
 ```python
 # app/providers/base.py
@@ -205,11 +224,15 @@ class ExtractInput(BaseModel):
     filename: str
 
 class LLMProvider(Protocol):
-    async def extract(self, doc: ExtractInput, schema: dict) -> dict: ...
+    async def extract(self, doc: ExtractInput, schema: dict, *, persona: AgentPersona) -> dict: ...
     async def rewrite(self, op: str, target_text: str, source_text: str | None,
-                       char_limit: int | None) -> str: ...
+                       char_limit: int | None, *, persona: AgentPersona) -> str: ...
     async def test_connection(self) -> ConnectionStatus: ...
 ```
+
+`persona` (`models/user.AgentPersona` — `business_analyst` | `technical_developer`, the
+`users.agent_persona` column) selects which system prompt in `providers/prompts.py`
+frames the call — see "Prompt design" below.
 
 `registry.py` resolves `LLMProvider` for a request: load the user's
 `ai_provider_settings` row for the requested (or default) provider, decrypt the API key
@@ -285,30 +308,37 @@ are cheap to construct (no persistent connection) so they're built per-call, not
 
 ### Prompt design ("as human as possible")
 
-Both providers share one prompt-building module (`services/prompts.py`) so the
+Both providers share one prompt-building module (`app/providers/prompts.py`) so the
 instructions stay in one place regardless of which model executes them:
 
-- **Persona: Technical Business Analyst, not developer.** Both the extraction and
-  rewrite prompts write description/responsibilities text the way a business analyst
-  would explain the work to a business stakeholder — plain, human language centered on
-  the problem solved and its impact, not a list of engineering jargon. This is a framing
-  instruction only: the "never invent a fact" rule below still applies in full, so the
-  persona can translate existing technical detail into business terms but cannot add
-  outcomes or business value the source text doesn't state.
-- **Extraction system prompt**: "You are a Technical Business Analyst reviewing a
-  project document. Extract only what is explicitly present in the document. Use `null` for
-  anything not stated — never infer, estimate, or invent a date, employer, or metric that
-  isn't written down." Explicit nullability on every optional schema field (not just
-  Python `| None` — the JSON Schema itself must mark it non-required) is what actually
-  stops small local models from hallucinating plausible-looking values (RESEARCH.md §B4
-  point 4).
+- **Persona is a per-user setting, not a fixed constant** (Settings > AI Providers >
+  "Agent Persona", `users.agent_persona`, default `business_analyst`). Both the
+  extraction and rewrite prompts are keyed by `AgentPersona` —
+  `EXTRACTION_SYSTEM_PROMPTS[persona]` / `REWRITE_SYSTEM_PROMPTS[persona]` — so the
+  persona changes only *how* the same facts are framed, never whether the model can
+  invent new ones: the "never invent a fact" rule below is identical across every
+  persona variant.
+  - **`business_analyst`** (default) writes description/responsibilities text the way a
+    business analyst would explain the work to a business stakeholder — plain, human
+    language centered on the problem solved and its impact, translating technical detail
+    into business-outcome terms ("led a project that cut customer response times by
+    40%" not "implemented an async caching layer that reduced p95 latency by 40%").
+  - **`technical_developer`** writes the same facts the way one engineer would explain
+    the work to another — naming the architecture, languages, frameworks, and technical
+    approach directly instead of translating them into business outcomes.
+- **Extraction system prompt** (per persona): "You are a Technical Business Analyst /
+  Technical Developer reviewing a project document. Extract only what is explicitly
+  present in the document. Use `null` for anything not stated — never infer, estimate, or
+  invent a date, employer, or metric that isn't written down." Explicit nullability on
+  every optional schema field (not just Python `| None` — the JSON Schema itself must
+  mark it non-required) is what actually stops small local models from hallucinating
+  plausible-looking values (RESEARCH.md §B4 point 4).
 - **Rewrite prompts** (`enhance-long`, `generate-short`, `enhance-short`) are told to
-  write **first person, active voice, business-impact language over jargon** ("led a
-  project that cut customer response times by 40%" not "implemented an async caching
-  layer that reduced p95 latency by 40%"), and explicitly forbidden from introducing
-  facts, numbers, or technologies absent from the source text — this is enforced by
-  prompt instruction only (LLMs can't be sandboxed from fabricating), so the UI's
-  mandatory human-review step is the real safety net, not the prompt.
+  write **first person, active voice**, in whichever persona's framing is active, and
+  explicitly forbidden from introducing facts, numbers, or technologies absent from the
+  source text — this is enforced by prompt instruction only (LLMs can't be sandboxed
+  from fabricating), so the UI's mandatory human-review step is the real safety net, not
+  the prompt.
 - **390-char short-summary cap — generate-then-verify-then-retry loop**, since neither
   provider can be trusted to hit an exact character count:
 

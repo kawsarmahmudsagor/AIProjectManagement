@@ -33,6 +33,7 @@ async def rewrite(
             char_limit=_CHAR_LIMITS.get(payload.op),
             context=payload.context.model_dump() if payload.context else None,
             instruction=payload.instruction,
+            persona=user.agent_persona,
         )
     except ProviderError as exc:
         raise HTTPException(

@@ -1,6 +1,7 @@
 "use client";
 
 import { zodResolver } from "@hookform/resolvers/zod";
+import { useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { useRef, useState } from "react";
 import { useForm } from "react-hook-form";
@@ -9,6 +10,7 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { DualEditorField } from "@/components/projects/fields/dual-editor-field";
 import { DocumentUpload } from "@/components/projects/upload/document-upload";
+import { PROJECTS_NAV_QUERY_KEY } from "@/components/layout/projects-nav-section";
 import { apiFetch, ApiError } from "@/lib/api-client";
 import { emptyProjectFormValues, projectFormSchema, type ProjectFormValues } from "@/lib/project-schema";
 import type { RichText } from "@/lib/rich-text/types";
@@ -19,6 +21,7 @@ const NO_AUTOFILL: SectionAutofill = { token: 0 };
 
 export function ProjectForm({ project }: { project?: Project }) {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const [serverError, setServerError] = useState<string | null>(null);
 
   const [descriptionAutofill, setDescriptionAutofill] = useState<SectionAutofill>(NO_AUTOFILL);
@@ -123,6 +126,7 @@ export function ProjectForm({ project }: { project?: Project }) {
       const saved = project
         ? await apiFetch<Project>(`projects/${project.id}`, { method: "PATCH", body: JSON.stringify(payload) })
         : await apiFetch<Project>("projects", { method: "POST", body: JSON.stringify(payload) });
+      queryClient.invalidateQueries({ queryKey: PROJECTS_NAV_QUERY_KEY });
       router.replace(`/projects/${saved.id}`);
       router.refresh();
     } catch (err) {
@@ -250,7 +254,7 @@ export function ProjectForm({ project }: { project?: Project }) {
         <Button type="button" variant="secondary" onClick={() => router.back()}>
           Cancel
         </Button>
-        <Button type="submit" disabled={isSubmitting}>
+        <Button type="submit" disabled={isSubmitting} className="min-w-[140px]">
           {isSubmitting ? "Saving…" : "Save Project"}
         </Button>
       </div>

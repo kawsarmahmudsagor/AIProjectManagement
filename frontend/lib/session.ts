@@ -4,7 +4,7 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { COOKIE, FASTAPI_URL } from "./env";
 
-export type User = { id: string; email: string };
+export type User = { id: string; email: string; agent_persona: "business_analyst" | "technical_developer" };
 
 /** Real authorization — proxy.ts only does a coarse cookie-presence check (DESIGN.md §5);
  * this is what actually verifies the token against FastAPI. Call from every (app) layout. */

@@ -30,10 +30,11 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
 from ollama import AsyncClient
 
+from app.models.user import AgentPersona
 from app.providers.base import ConnectionStatus, ExtractInput, LLMProvider, ProviderError
 from app.providers.prompts import (
-    EXTRACTION_SYSTEM_PROMPT,
-    REWRITE_SYSTEM_PROMPT,
+    EXTRACTION_SYSTEM_PROMPTS,
+    REWRITE_SYSTEM_PROMPTS,
     build_rewrite_prompt,
     extraction_schema_prompt,
 )
@@ -91,7 +92,7 @@ class OllamaProvider(LLMProvider):
             model_ctx = _MAX_NUM_CTX
         return min(max(_DEFAULT_NUM_CTX, _next_pow2(estimated_tokens)), model_ctx, _MAX_NUM_CTX)
 
-    async def extract(self, doc: ExtractInput, json_schema: dict) -> dict:
+    async def extract(self, doc: ExtractInput, json_schema: dict, *, persona: AgentPersona) -> dict:
         if _is_cloud(self._base_url) or is_ollama_cloud_model(self._model):
             raise ProviderError(
                 "PROVIDER_UNSUPPORTED",
@@ -114,7 +115,7 @@ class OllamaProvider(LLMProvider):
 
         try:
             response = await chat.ainvoke(
-                [SystemMessage(content=EXTRACTION_SYSTEM_PROMPT), HumanMessage(content=prompt)]
+                [SystemMessage(content=EXTRACTION_SYSTEM_PROMPTS[persona]), HumanMessage(content=prompt)]
             )
         except (ConnectError, TimeoutException) as exc:
             raise ProviderError("PROVIDER_UNREACHABLE", f"Ollama isn't responding: {exc}") from exc
@@ -156,13 +157,14 @@ class OllamaProvider(LLMProvider):
         char_limit: int | None,
         context: dict | None = None,
         instruction: str | None = None,
+        persona: AgentPersona,
     ) -> str:
         prompt = build_rewrite_prompt(op, source_text or target_text, char_limit, context, instruction)
         chat = self._chat(num_ctx=_DEFAULT_NUM_CTX, num_predict=_REWRITE_NUM_PREDICT, temperature=0.3)
 
         try:
             response = await chat.ainvoke(
-                [SystemMessage(content=REWRITE_SYSTEM_PROMPT), HumanMessage(content=prompt)]
+                [SystemMessage(content=REWRITE_SYSTEM_PROMPTS[persona]), HumanMessage(content=prompt)]
             )
         except (ConnectError, TimeoutException) as exc:
             raise ProviderError("PROVIDER_UNREACHABLE", f"Ollama isn't responding: {exc}") from exc

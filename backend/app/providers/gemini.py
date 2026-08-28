@@ -22,10 +22,11 @@ import json
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 
+from app.models.user import AgentPersona
 from app.providers.base import ConnectionStatus, ExtractInput, LLMProvider, ProviderError
 from app.providers.prompts import (
-    EXTRACTION_SYSTEM_PROMPT,
-    REWRITE_SYSTEM_PROMPT,
+    EXTRACTION_SYSTEM_PROMPTS,
+    REWRITE_SYSTEM_PROMPTS,
     build_rewrite_prompt,
 )
 
@@ -40,7 +41,7 @@ class GeminiProvider(LLMProvider):
         # and it keeps this provider stateless like OllamaProvider.
         return ChatGoogleGenerativeAI(model=self._model_name, google_api_key=self._api_key, **extra)
 
-    async def extract(self, doc: ExtractInput, json_schema: dict) -> dict:
+    async def extract(self, doc: ExtractInput, json_schema: dict, *, persona: AgentPersona) -> dict:
         if doc.raw_bytes and doc.mime_type == "application/pdf":
             human_content = [
                 {
@@ -66,7 +67,7 @@ class GeminiProvider(LLMProvider):
 
         try:
             response = await chat.ainvoke(
-                [SystemMessage(content=EXTRACTION_SYSTEM_PROMPT), HumanMessage(content=human_content)]
+                [SystemMessage(content=EXTRACTION_SYSTEM_PROMPTS[persona]), HumanMessage(content=human_content)]
             )
         except Exception as exc:  # noqa: BLE001 — langchain wraps provider errors inconsistently across versions
             code, retryable = _classify_error(exc)
@@ -94,13 +95,14 @@ class GeminiProvider(LLMProvider):
         char_limit: int | None,
         context: dict | None = None,
         instruction: str | None = None,
+        persona: AgentPersona,
     ) -> str:
         prompt = build_rewrite_prompt(op, source_text or target_text, char_limit, context, instruction)
         chat = self._chat(thinking_level="low", max_output_tokens=2048)
 
         try:
             response = await chat.ainvoke(
-                [SystemMessage(content=REWRITE_SYSTEM_PROMPT), HumanMessage(content=prompt)]
+                [SystemMessage(content=REWRITE_SYSTEM_PROMPTS[persona]), HumanMessage(content=prompt)]
             )
         except Exception as exc:  # noqa: BLE001
             code, retryable = _classify_error(exc)

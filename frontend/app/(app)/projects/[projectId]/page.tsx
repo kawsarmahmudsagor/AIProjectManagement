@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, Badge } from "@/components/ui/card";
+import { DeleteProjectButton } from "@/components/projects/delete-project-button";
 import { serverApiFetch } from "@/lib/server-api";
 import type { Project } from "@/lib/types";
 
@@ -50,6 +51,7 @@ export default async function ProjectDetailPage({
               <Download size={14} /> DOCX
             </Button>
           </a>
+          <DeleteProjectButton projectId={project.id} projectName={project.name} redirectTo="/projects" />
         </div>
       </div>
 

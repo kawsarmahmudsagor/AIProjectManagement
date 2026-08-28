@@ -23,6 +23,7 @@ dependencies = [
     "langchain-core>=0.3",
     "langchain-google-genai>=2.1",
     "langchain-ollama>=0.3",
+    "langgraph>=0.2",
     "pdfplumber>=0.11.10",
     "pypdf>=6.16",
     "docx2python>=3.1",

@@ -2,6 +2,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, EmailStr, Field
 
+from app.models.user import AgentPersona
+
 
 class RegisterRequest(BaseModel):
     email: EmailStr
@@ -20,8 +22,13 @@ class RefreshRequest(BaseModel):
 class UserOut(BaseModel):
     id: UUID
     email: EmailStr
+    agent_persona: AgentPersona
 
     model_config = {"from_attributes": True}
+
+
+class UserUpdate(BaseModel):
+    agent_persona: AgentPersona | None = None
 
 
 class TokenPair(BaseModel):

@@ -13,7 +13,15 @@ from app.core.security import (
     verify_password,
 )
 from app.models.user import User
-from app.schemas.auth import AuthResponse, LoginRequest, RefreshRequest, RegisterRequest, TokenPair, UserOut
+from app.schemas.auth import (
+    AuthResponse,
+    LoginRequest,
+    RefreshRequest,
+    RegisterRequest,
+    TokenPair,
+    UserOut,
+    UserUpdate,
+)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -64,4 +72,15 @@ async def refresh(payload: RefreshRequest, db: AsyncSession = Depends(get_db)) -
 
 @router.get("/me", response_model=UserOut)
 async def me(user: User = CurrentUser) -> UserOut:
+    return UserOut.model_validate(user)
+
+
+@router.patch("/me", response_model=UserOut)
+async def update_me(
+    payload: UserUpdate, user: User = CurrentUser, db: AsyncSession = Depends(get_db)
+) -> UserOut:
+    if payload.agent_persona is not None:
+        user.agent_persona = payload.agent_persona
+        await db.commit()
+        await db.refresh(user)
     return UserOut.model_validate(user)

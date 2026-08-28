@@ -24,7 +24,7 @@ export function AiSuggestionPanel({
 
   if (state.status === "loading") {
     return (
-      <div className="mt-2 flex items-center gap-2 rounded-lg border border-accent/30 bg-accent/5 px-3 py-2 text-sm text-muted">
+      <div className="ai-glow ai-glow--generating mt-2 flex items-center gap-2 rounded-lg border border-accent/30 bg-accent/5 px-3 py-2 text-sm text-muted">
         <Sparkles size={14} className="animate-pulse text-accent" />
         Thinking…
         <button type="button" onClick={onDiscard} className="ml-auto text-xs text-muted hover:text-foreground">

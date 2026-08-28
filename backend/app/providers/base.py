@@ -7,6 +7,8 @@ from typing import Protocol
 
 from pydantic import BaseModel
 
+from app.models.user import AgentPersona
+
 
 class ConnectionStatus(BaseModel):
     ok: bool
@@ -39,9 +41,11 @@ class ProviderError(Exception):
 
 
 class LLMProvider(Protocol):
-    async def extract(self, doc: ExtractInput, json_schema: dict) -> dict:
+    async def extract(self, doc: ExtractInput, json_schema: dict, *, persona: AgentPersona) -> dict:
         """Return a raw dict matching json_schema — callers validate against
-        schemas.job.ExtractionResult themselves."""
+        schemas.job.ExtractionResult themselves. `persona` selects which system prompt
+        (Settings > AI Providers > Agent Persona) frames the extraction — see
+        providers/prompts.py."""
         ...
 
     async def rewrite(
@@ -53,6 +57,7 @@ class LLMProvider(Protocol):
         char_limit: int | None,
         context: dict | None = None,
         instruction: str | None = None,
+        persona: AgentPersona,
     ) -> str:
         """One of enhance-long / generate-short / enhance-short. `context` carries
         surrounding project fields (name, role, technologies) so the rewrite reads

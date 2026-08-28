@@ -11,7 +11,8 @@ edit → export to PDF/DOCX. Multi-user, dark-themed, two swappable AI providers
 | Backend | Python 3.11+, FastAPI (async), SQLAlchemy 2.0 (async) + Alembic, PostgreSQL |
 | Frontend | Next.js 16 (App Router, TS), Tailwind CSS v4, shadcn/ui (Base UI), Tiptap |
 | Job queue | [SAQ](https://github.com/tobymao/saq) on the **Postgres** backend — no Redis needed on Windows dev |
-| AI providers | Google Gemini and local Ollama, orchestrated via **LangChain** (`langchain-google-genai`, `langchain-ollama`) — chosen so the same chat-model instances can later back a chatbot feature. **Billing required on Gemini** — see below |
+| AI providers | Google Gemini and local Ollama, orchestrated via **LangChain** (`langchain-google-genai`, `langchain-ollama`); the rewrite path also runs through a **LangGraph** `StateGraph` (`app/agents/rewrite_graph.py`), the seed for a planned chatbot feature. **Billing required on Gemini** — see below |
+| Agent persona | Per-user "Business Analyst" (default) or "Technical Developer" system-prompt persona, configurable in Settings > AI Providers — swaps how extraction and "Enhance with AI" write the same facts, never what they invent |
 | Document parsing | `pdfplumber`, `docx2python`, `python-docx`, `mammoth` |
 | Export | `html-for-docx` (DOCX), Playwright/Chromium (PDF) |
 | Auth | JWT access + refresh tokens issued by FastAPI; Next.js BFF stores them as httpOnly cookies (browser never sees a token) |
@@ -119,8 +120,11 @@ npm run dev                    # http://localhost:3000
 
 ## Status
 
-Backend: domain models, auth, provider abstraction (Gemini + Ollama via LangChain),
-document ingest, DOCX/PDF export, and job queue wiring are in place per the design docs.
+Backend: domain models, auth, provider abstraction (Gemini + Ollama via LangChain, with
+the rewrite path orchestrated through a one-node LangGraph `StateGraph`), a per-user
+Agent Persona setting (Business Analyst / Technical Developer, swapping the system
+prompt for both extraction and rewrite), document ingest, DOCX/PDF export, and job queue
+wiring are in place per the design docs.
 
 Frontend: app shell, routing, API client config, and the full Add/Edit Project form are
 built, including the Tiptap dual rich-text editor (long/short pairs, toolbar, live char

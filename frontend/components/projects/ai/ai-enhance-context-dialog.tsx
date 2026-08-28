@@ -30,7 +30,10 @@ export function AiEnhanceContextDialog({
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
       onClick={onCancel}
     >
-      <Card className="w-full max-w-md space-y-3 shadow-xl" onClick={(e) => e.stopPropagation()}>
+      <Card
+        className="ai-glow ai-glow--generating w-full max-w-md space-y-3 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="flex items-center gap-2">
           <Sparkles size={16} className="text-accent" />
           <h2 id="ai-enhance-context-title" className="text-sm font-medium">

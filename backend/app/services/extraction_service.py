@@ -17,6 +17,7 @@ from app.core.richtext import html_to_text, sanitize_html, wrap_html
 from app.ingest.extract import UnsupportedFormatError, ingest
 from app.models.document import Document
 from app.models.extraction_job import ExtractionJob, JobStatus
+from app.models.user import AgentPersona, User
 from app.providers.base import ExtractInput, ProviderError
 from app.providers.registry import get_provider
 from app.providers.schema_utils import inline_refs
@@ -100,6 +101,8 @@ async def run_extraction_job(db: AsyncSession, job_id: UUID) -> None:
 
         try:
             provider = await get_provider(db, job.user_id, job.provider, purpose="extract")
+            user = await db.get(User, job.user_id)
+            persona = user.agent_persona if user else AgentPersona.BUSINESS_ANALYST
             raw_result = await provider.extract(
                 ExtractInput(
                     raw_bytes=parsed.raw_bytes if parsed.mime_type == "application/pdf" else None,
@@ -108,6 +111,7 @@ async def run_extraction_job(db: AsyncSession, job_id: UUID) -> None:
                     filename=document.filename,
                 ),
                 json_schema=_EXTRACTION_SCHEMA,
+                persona=persona,
             )
         except ProviderError as exc:
             await _fail(db, job, exc.code, exc.message)

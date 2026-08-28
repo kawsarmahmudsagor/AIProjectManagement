@@ -6,7 +6,9 @@ attempts, then fall back to a sentence-boundary truncation as a last resort.
 
 import re
 
+from app.agents.rewrite_graph import run_rewrite
 from app.core.richtext import html_to_text, sanitize_html, wrap_html
+from app.models.user import AgentPersona
 from app.providers.base import LLMProvider
 
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
@@ -34,12 +36,15 @@ async def rewrite_field(
     char_limit: int | None,
     context: dict | None = None,
     instruction: str | None = None,
+    persona: AgentPersona,
 ) -> tuple[str, str]:
     target_text = html_to_text(target_html)
     source_text = html_to_text(source_html) or target_text
 
     if op != "generate-short" or not char_limit:
-        draft = await provider.rewrite(
+        draft = await run_rewrite(
+            provider,
+            persona,
             op=op,
             target_text=target_text,
             source_text=source_text,
@@ -53,7 +58,9 @@ async def rewrite_field(
     working_source = source_text
     draft = ""
     for attempt in range(3):
-        draft = await provider.rewrite(
+        draft = await run_rewrite(
+            provider,
+            persona,
             op=op,
             target_text=target_text,
             source_text=working_source,
@@ -71,5 +78,5 @@ async def rewrite_field(
         )
 
     truncated = truncate_at_sentence(draft, char_limit)
-    html = sanitize_html(_wrap_html(truncated))
+    html = sanitize_html(wrap_html(truncated))
     return html, html_to_text(html)

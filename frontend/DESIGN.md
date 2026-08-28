@@ -104,7 +104,8 @@ src/
 │   │   └── settings/
 │   │       ├── layout.tsx                RSC  settings sub-nav
 │   │       ├── page.tsx                  RSC  redirect → ./ai-providers
-│   │       ├── ai-providers/page.tsx     RSC  → <AiProviderSettings/> CC (Ollama + Gemini, Test connection)
+│   │       ├── ai-providers/page.tsx     RSC  → AgentPersonaSelect CC (business_analyst|technical_developer,
+│   │       │                                    PATCH /auth/me) + AiProviderSettings CC (Ollama + Gemini, Test connection)
 │   │       └── account/page.tsx          RSC
 │   │
 │   └── api/                                   BFF — the browser only ever talks to these
