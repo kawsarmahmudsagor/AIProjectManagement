@@ -1,0 +1,43 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: A4; margin: 0; }
+  body { font-family: "Segoe UI", Arial, sans-serif; color: #1a1a2e; line-height: 1.5; }
+  h1 { font-size: 22px; margin-bottom: 2px; }
+  .role { color: #4a4a68; font-style: italic; margin-bottom: 10px; }
+  .meta { color: #6b6b85; font-size: 13px; margin-bottom: 16px; }
+  h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .04em;
+       border-bottom: 1px solid #d8d8e8; padding-bottom: 4px; margin-top: 22px; }
+  ul { margin: 6px 0; padding-left: 20px; }
+  .tech { margin-top: 6px; }
+  .tech span { display: inline-block; background: #eef0fb; color: #34348a;
+               border-radius: 4px; padding: 2px 8px; margin: 2px 4px 2px 0; font-size: 12px; }
+</style>
+</head>
+<body>
+  <h1>{{ project.name }}</h1>
+  <div class="role">{{ project.role }}</div>
+  <div class="meta">
+    {{ project.start_date.strftime("%B %Y") }} –
+    {% if project.is_current %}Present{% elif project.end_date %}{{ project.end_date.strftime("%B %Y") }}{% endif %}
+    {% if project.project_url %} · <a href="{{ project.project_url }}">{{ project.project_url }}</a>{% endif %}
+  </div>
+
+  {% if project.description_long_html or project.description_short_html %}
+  <h2>Project Description</h2>
+  {{ (project.description_long_html or project.description_short_html) | safe }}
+  {% endif %}
+
+  {% if project.responsibilities_long_html or project.responsibilities_short_html %}
+  <h2>Responsibilities</h2>
+  {{ (project.responsibilities_long_html or project.responsibilities_short_html) | safe }}
+  {% endif %}
+
+  {% if project.technologies %}
+  <h2>Technologies</h2>
+  <div class="tech">{% for t in project.technologies %}<span>{{ t }}</span>{% endfor %}</div>
+  {% endif %}
+</body>
+</html>

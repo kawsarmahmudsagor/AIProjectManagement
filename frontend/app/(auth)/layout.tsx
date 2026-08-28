@@ -1,0 +1,10 @@
+export default function AuthLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-background px-4">
+      <div className="w-full max-w-sm">
+        <h1 className="mb-8 text-center text-xl font-semibold">AI Project Management</h1>
+        {children}
+      </div>
+    </div>
+  );
+}

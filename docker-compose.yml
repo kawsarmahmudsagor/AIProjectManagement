@@ -1,0 +1,23 @@
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: aipm
+      POSTGRES_PASSWORD: aipm
+      POSTGRES_DB: aipm
+    ports:
+      # Host port 5433, not 5432 — many dev machines (including this one) already run a
+      # native PostgreSQL service on 5432. Point DATABASE_URL at 5433 to use this
+      # container instead of a native install; see README.md.
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aipm -d aipm"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:
