@@ -8,6 +8,7 @@ from app.core.deps import CurrentUser
 from app.models.user import User
 from app.schemas.project import ProjectCreate, ProjectListResponse, ProjectOut, ProjectSummary, ProjectUpdate
 from app.services import project_service
+from app.workers.settings import enqueue_suggestion_recompute
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -64,6 +65,8 @@ async def create_project(
     payload: ProjectCreate, user: User = CurrentUser, db: AsyncSession = Depends(get_db)
 ) -> ProjectOut:
     project = await project_service.create_project(db, user.id, payload)
+    if user.chatbot_preemptive_github_suggestions and project.technologies:
+        await enqueue_suggestion_recompute(user.id)
     return _to_out(project)
 
 
@@ -87,7 +90,12 @@ async def update_project(
     project_id: UUID, payload: ProjectUpdate, user: User = CurrentUser, db: AsyncSession = Depends(get_db)
 ) -> ProjectOut:
     project = await _get_owned_project(project_id, user, db)
+    tech_changed = payload.technologies is not None and (
+        {t.lower() for t in payload.technologies} != {t.lower() for t in project.technologies}
+    )
     project = await project_service.update_project(db, project, payload)
+    if user.chatbot_preemptive_github_suggestions and tech_changed:
+        await enqueue_suggestion_recompute(user.id)
     return _to_out(project)
 
 
@@ -96,4 +104,7 @@ async def delete_project(
     project_id: UUID, user: User = CurrentUser, db: AsyncSession = Depends(get_db)
 ) -> None:
     project = await _get_owned_project(project_id, user, db)
+    had_technologies = bool(project.technologies)
     await project_service.delete_project(db, project)
+    if user.chatbot_preemptive_github_suggestions and had_technologies:
+        await enqueue_suggestion_recompute(user.id)

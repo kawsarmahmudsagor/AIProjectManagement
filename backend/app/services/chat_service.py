@@ -7,43 +7,40 @@ turn never hangs the SSE stream half-open.
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from typing import Literal
 from uuid import UUID
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
-from sqlalchemy import select
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.chat_tools import TOOL_LABELS, build_tools
 from app.agents.chatbot_graph import stream_chat
+from app.agents.chatbot_graph import stringify_content as _stringify_content
 from app.models.ai_provider_setting import ProviderName
 from app.models.chat import ChatMessage, ChatRole, ChatSession
 from app.models.user import ChatProvider, User
 from app.providers.base import ProviderError
-from app.providers.prompts import build_chatbot_system_prompt
+from app.providers.prompts import (
+    build_chatbot_system_prompt,
+    build_compaction_prompt,
+    build_title_generation_prompt,
+)
 from app.providers.registry import get_provider
 from app.schemas.chat import ChatSSEEvent
 from app.services.profile_service import build_context_digest
+
+# Compaction thresholds for _build_history/compact_history below — see that function's
+# docstring for the rolling-summary design.
+COMPACTION_THRESHOLD = 50
+_COMPACTION_KEEP_RECENT = 10
 
 
 class ChatSessionNotFoundError(Exception):
     pass
 
 
-async def get_or_create_current_session(db: AsyncSession, user: User) -> ChatSession:
-    """Returns the user's most recent session, or creates one. v1's frontend only ever
-    operates on this single "current" session — no session-switcher UI yet — though the
-    schema supports multiple sessions per user for that to be a later, non-breaking
-    addition (see the plan's Part A.2)."""
-    stmt = (
-        select(ChatSession)
-        .where(ChatSession.user_id == user.id)
-        .order_by(ChatSession.last_message_at.desc())
-        .limit(1)
-    )
-    session = (await db.execute(stmt)).scalars().first()
-    if session is not None:
-        return session
-
+async def _create_session_with_greeting(db: AsyncSession, user: User) -> ChatSession:
     session = ChatSession(user_id=user.id)
     db.add(session)
     await db.flush()
@@ -56,10 +53,11 @@ async def get_or_create_current_session(db: AsyncSession, user: User) -> ChatSes
         session_id=session.id,
         role=ChatRole.ASSISTANT,
         content=(
-            f"Hi {user.chat_display_name}! I'm Jarvis, your Project Intelligence & "
-            "Technology Advisor. Ask me about your projects, cross-project tech "
-            "patterns, or open-source recommendations — I'll always ground anything "
-            "about your own work in your real project data."
+            f"Hey {user.chat_display_name}! Jarvis here — think of me as your go-to "
+            "for anything about your projects — I can dig through your work, spot tech "
+            "patterns across it, or point you to solid open-source tools if you're "
+            "exploring something new. Ask away, and I'll always stick to what's "
+            "actually in your projects when I'm talking about your own work."
         ),
     )
     db.add(greeting)
@@ -68,19 +66,83 @@ async def get_or_create_current_session(db: AsyncSession, user: User) -> ChatSes
     return session
 
 
-async def list_sessions(db: AsyncSession, user_id: UUID) -> list[ChatSession]:
+async def get_or_create_current_session(db: AsyncSession, user: User) -> ChatSession:
+    """Returns the user's most recent session, or creates one — this is what the floating
+    widget opens by default. Multiple sessions per user are fully supported (see
+    create_new_session below and the /conversations page's resume flow); this just picks
+    whichever one currently has the newest last_message_at."""
     stmt = (
         select(ChatSession)
-        .where(ChatSession.user_id == user_id)
+        .where(ChatSession.user_id == user.id)
         .order_by(ChatSession.last_message_at.desc())
+        .limit(1)
     )
-    return list((await db.execute(stmt)).scalars().all())
+    session = (await db.execute(stmt)).scalars().first()
+    if session is not None:
+        return session
+    return await _create_session_with_greeting(db, user)
+
+
+async def create_new_session(db: AsyncSession, user: User) -> ChatSession:
+    """Unconditionally starts a brand-new conversation (the widget's "New chat" action),
+    as opposed to get_or_create_current_session's "resume whatever's most recent"
+    behavior. Since it's freshly created its last_message_at is the newest, so it
+    immediately becomes the "current" session too."""
+    return await _create_session_with_greeting(db, user)
+
+
+async def list_sessions(
+    db: AsyncSession,
+    user_id: UUID,
+    *,
+    q: str | None = None,
+    starred_only: bool = False,
+    sort: Literal["asc", "desc"] = "desc",
+    page: int = 1,
+    page_size: int = 20,
+) -> tuple[list[ChatSession], int]:
+    query = select(ChatSession).where(ChatSession.user_id == user_id)
+    count_query = select(func.count()).select_from(ChatSession).where(ChatSession.user_id == user_id)
+
+    if q:
+        pattern = f"%{q}%"
+        query = query.where(ChatSession.title.ilike(pattern))
+        count_query = count_query.where(ChatSession.title.ilike(pattern))
+
+    if starred_only:
+        query = query.where(ChatSession.starred.is_(True))
+        count_query = count_query.where(ChatSession.starred.is_(True))
+
+    total = (await db.execute(count_query)).scalar_one()
+    order = ChatSession.last_message_at.asc() if sort == "asc" else ChatSession.last_message_at.desc()
+    query = query.order_by(order).offset((page - 1) * page_size).limit(page_size)
+    items = (await db.execute(query)).scalars().all()
+    return list(items), total
 
 
 async def delete_session(db: AsyncSession, user_id: UUID, session_id: UUID) -> None:
     session = await _get_owned_session(db, user_id, session_id)
     await db.delete(session)
     await db.commit()
+
+
+async def set_starred(db: AsyncSession, user_id: UUID, session_id: UUID, starred: bool) -> ChatSession:
+    session = await _get_owned_session(db, user_id, session_id)
+    session.starred = starred
+    await db.commit()
+    await db.refresh(session)
+    return session
+
+
+async def activate_session(db: AsyncSession, user_id: UUID, session_id: UUID) -> ChatSession:
+    """Bumps last_message_at to now with no message changes, so this session becomes
+    "current" again per get_or_create_current_session's `order_by(last_message_at.desc())`
+    — how the frontend "resume this conversation in the chat widget" action works."""
+    session = await _get_owned_session(db, user_id, session_id)
+    session.last_message_at = datetime.now(UTC)
+    await db.commit()
+    await db.refresh(session)
+    return session
 
 
 async def _get_owned_session(db: AsyncSession, user_id: UUID, session_id: UUID) -> ChatSession:
@@ -92,8 +154,10 @@ async def _get_owned_session(db: AsyncSession, user_id: UUID, session_id: UUID) 
 
 async def get_session_messages(db: AsyncSession, user_id: UUID, session_id: UUID) -> list[ChatMessage]:
     await _get_owned_session(db, user_id, session_id)
+    # Ordered by the monotonic `sequence` column, not created_at — see ChatMessage.sequence's
+    # docstring for why created_at can't serve as a reliable ordering/tiebreak key here.
     stmt = (
-        select(ChatMessage).where(ChatMessage.session_id == session_id).order_by(ChatMessage.created_at)
+        select(ChatMessage).where(ChatMessage.session_id == session_id).order_by(ChatMessage.sequence)
     )
     return list((await db.execute(stmt)).scalars().all())
 
@@ -115,6 +179,48 @@ def _rows_to_messages(rows: list[ChatMessage]) -> list[BaseMessage]:
     return messages
 
 
+def _unsummarized_rows(session: ChatSession, rows: list[ChatMessage]) -> list[ChatMessage]:
+    """Rows after session.summarized_through_message_id, found by position within `rows`
+    rather than by comparing created_at — Postgres's now()/CURRENT_TIMESTAMP is fixed for
+    the whole transaction, so every ChatMessage persisted in one turn shares an identical
+    created_at, which breaks any timestamp-inequality cutoff. get_session_messages orders
+    by (created_at, id), a stable total order, so "the boundary's index + 1 onward" is
+    well-defined and consistent across separate calls."""
+    if session.summarized_through_message_id is None:
+        return rows
+    boundary_index = next(
+        (i for i, r in enumerate(rows) if r.id == session.summarized_through_message_id), None
+    )
+    return rows[boundary_index + 1 :] if boundary_index is not None else rows
+
+
+def _build_history(session: ChatSession, rows: list[ChatMessage]) -> list[BaseMessage]:
+    """Replays persisted rows into the LangChain message sequence sent to the LLM,
+    applying rolling-summary compaction (see compact_history below): once
+    session.summarized_through_message_id is set, only rows after that boundary are
+    replayed, prefixed with one synthetic SystemMessage carrying session.context_summary.
+    Rows in the DB and what the chat UI renders are untouched either way — this only
+    shrinks what's sent to the LLM as context."""
+    messages = _rows_to_messages(_unsummarized_rows(session, rows))
+    if session.context_summary:
+        messages = [
+            SystemMessage(content=f"Summary of earlier conversation:\n\n{session.context_summary}"),
+            *messages,
+        ]
+    return messages
+
+
+async def needs_title_generation(db: AsyncSession, user_id: UUID, session_id: UUID) -> bool:
+    session = await _get_owned_session(db, user_id, session_id)
+    return session.title == "New chat"
+
+
+async def unsummarized_message_count(db: AsyncSession, user_id: UUID, session_id: UUID) -> int:
+    session = await _get_owned_session(db, user_id, session_id)
+    rows = await get_session_messages(db, user_id, session_id)
+    return len(_unsummarized_rows(session, rows))
+
+
 async def stream_turn(
     db: AsyncSession,
     user: User,
@@ -134,7 +240,7 @@ async def stream_turn(
         "session_meta", {"session_id": str(session.id), "user_message_id": str(human_row.id)}
     )
 
-    history = _rows_to_messages(await get_session_messages(db, user.id, session_id))
+    history = _build_history(session, await get_session_messages(db, user.id, session_id))
 
     chat_provider = provider_override or user.chat_provider
     new_messages: list[BaseMessage] = []
@@ -200,7 +306,7 @@ async def _persist_turn(
             row = ChatMessage(
                 session_id=session.id,
                 role=ChatRole.ASSISTANT,
-                content=message.content or "",
+                content=_stringify_content(message.content) or "",
                 tool_calls=message.tool_calls or None,
             )
             db.add(row)
@@ -211,15 +317,89 @@ async def _persist_turn(
                 ChatMessage(
                     session_id=session.id,
                     role=ChatRole.TOOL,
-                    content=str(message.content),
+                    content=_stringify_content(message.content),
                     tool_call_id=message.tool_call_id,
                     tool_name=message.name,
                     tool_result=getattr(message, "artifact", None),
                 )
             )
 
-    if session.title == "New chat":
-        session.title = user_message[:60]
     session.last_message_at = datetime.now(UTC)
     await db.commit()
     return last_assistant_id
+
+
+async def generate_session_title(db: AsyncSession, session_id: UUID) -> None:
+    """Background job body (see workers/tasks.py's thin wrapper) — replaces a session's
+    default "New chat" title with a short LLM-generated one based on its first exchange.
+    No-ops if the session is gone or was already renamed since this job was enqueued
+    (e.g. a duplicate enqueue from an overlapping turn), so it never clobbers a title
+    the user or a later run already set."""
+    session = await db.get(ChatSession, session_id)
+    if session is None or session.title != "New chat":
+        return
+
+    rows = await get_session_messages(db, session.user_id, session_id)
+    first_user = next((r for r in rows if r.role == ChatRole.USER), None)
+    first_assistant = next((r for r in rows if r.role == ChatRole.ASSISTANT), None)
+    if first_user is None or first_assistant is None:
+        return
+
+    user = await db.get(User, session.user_id)
+    if user is None:
+        return
+
+    try:
+        provider = await get_provider(db, user.id, ProviderName(user.chat_provider.value), purpose="chat")
+        prompt = build_title_generation_prompt(first_user.content, first_assistant.content)
+        response = await provider.get_chat_model().ainvoke([HumanMessage(content=prompt)])
+    except Exception:  # noqa: BLE001 — a failed background title-gen must never crash the job
+        return
+
+    title = _stringify_content(response.content).strip().strip('"').strip("'")
+    if not title:
+        return
+
+    session.title = title[:200]
+    await db.commit()
+
+
+async def compact_history(db: AsyncSession, session_id: UUID) -> None:
+    """Background job body — folds everything but the most recent _COMPACTION_KEEP_RECENT
+    messages into session.context_summary, merging with any prior summary, and advances
+    summarized_through_message_id to the cutoff. Raw ChatMessage rows are never touched;
+    this only shrinks what _build_history sends to the LLM on future turns. Safe to run
+    more than once concurrently for the same session — worst case is redundant LLM work,
+    not incorrect state, since each run does one read-then-write pass."""
+    session = await db.get(ChatSession, session_id)
+    if session is None:
+        return
+
+    rows = _unsummarized_rows(session, await get_session_messages(db, session.user_id, session_id))
+
+    if len(rows) <= _COMPACTION_KEEP_RECENT:
+        return
+
+    to_summarize = rows[:-_COMPACTION_KEEP_RECENT]
+    new_boundary = to_summarize[-1]
+
+    transcript_text = "\n".join(f"{r.role.value}: {r.content}" for r in to_summarize if r.content)
+
+    user = await db.get(User, session.user_id)
+    if user is None:
+        return
+
+    try:
+        provider = await get_provider(db, user.id, ProviderName(user.chat_provider.value), purpose="chat")
+        prompt = build_compaction_prompt(session.context_summary, transcript_text)
+        response = await provider.get_chat_model().ainvoke([HumanMessage(content=prompt)])
+    except Exception:  # noqa: BLE001 — a failed background compaction must never crash the job
+        return
+
+    summary = _stringify_content(response.content).strip()
+    if not summary:
+        return
+
+    session.context_summary = summary
+    session.summarized_through_message_id = new_boundary.id
+    await db.commit()

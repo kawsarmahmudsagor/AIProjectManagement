@@ -16,7 +16,8 @@ Profile page.
 | Job queue | [SAQ](https://github.com/tobymao/saq) on the **Postgres** backend — no Redis needed on Windows dev |
 | AI providers | Google Gemini and local Ollama, orchestrated via **LangChain** (`langchain-google-genai`, `langchain-ollama`); the rewrite path runs through a **LangGraph** `StateGraph` (`app/agents/rewrite_graph.py`), and Jarvis runs through a second, tool-calling LangGraph agent (`app/agents/chatbot_graph.py`). **Billing required on Gemini** — see below |
 | Agent persona | Per-user "Business Analyst" (default) or "Technical Developer" system-prompt persona, configurable in Settings > AI Providers — swaps how extraction and "Enhance with AI" write the same facts, never what they invent |
-| Jarvis (chatbot) | Real LLM tool-calling agent (`project_search`, `portfolio_analysis`, `github_search`) with a persisted, streamed (SSE) chat, floating bottom-right on every authenticated page. Grounds anything about the user's own projects in tool results only — never invents them — and separately can use general knowledge + a live GitHub search for technology recommendations. Configurable per-user provider (Gemini/Ollama) and a "preemptive suggestions" toggle in Settings > Chatbot. See `docs/RESEARCH.md` §E for live-verified findings (incl. Ollama tool-calling) |
+| Jarvis (chatbot) | Real LLM tool-calling agent (`project_search`, `portfolio_analysis`, `github_search`) with a persisted, streamed (SSE) chat, floating bottom-right on every authenticated page. Grounds anything about the user's own projects in tool results only — never invents them — and separately can use general knowledge + a live GitHub search for technology recommendations, never repeating a repo already suggested to that user. Configurable per-user provider (Gemini/Ollama) and a "preemptive suggestions" toggle in Settings > Chatbot. Conversations are managed from a dedicated `/conversations` page (search, star, delete, resume), get an auto-generated title after the first exchange, and are summarized in the background once they get long, to keep replayed context bounded. See `docs/RESEARCH.md` §E for live-verified findings (incl. Ollama tool-calling) |
+| Proactive suggestions | A SAQ background job — triggered whenever a project's technologies change, and on a 20-minute catch-up cron otherwise — computes each user's most-used technologies and looks up real GitHub repos for them, shown as a "Suggested for you" card on the Dashboard, independent of whether the user ever opens the chat. Shares the same no-repeat guarantee and quality bar (stars/freshness/not-archived) as Jarvis's own `github_search`, and is gated by the same Settings > Chatbot "preemptive suggestions" toggle |
 | Profile page | Optional CV-style profile (`/profile`): photo, name, designation/team/organization, skills, speciality, and five AI-enhanced bio sections (Professional Biography, Work Experience Summary, Career Objective, Key Strengths, Responsibilities). Entirely optional — Jarvis works fully without it, and only uses filled-in fields as soft context for GitHub recommendations, never as a verified fact or in its greeting |
 | Document parsing | `pdfplumber`, `docx2python`, `python-docx`, `mammoth` |
 | Export | `html-for-docx` (DOCX), Playwright/Chromium (PDF) |
@@ -170,7 +171,32 @@ conversation without repeating the greeting. Verified live against a real local 
 model (`gemma4:e2b`) and the real GitHub Search API — see `docs/RESEARCH.md` §E. Settings
 > Chatbot lets a user pick Jarvis's provider and toggle preemptive GitHub suggestions.
 
+**Conversation management — built**: sessions can be starred, searched by title, sorted,
+and deleted from a new `/conversations` page (`frontend/app/(app)/conversations/`,
+`frontend/components/conversations/`); resuming a conversation from that page reopens the
+floating widget on it via a new `ChatWidgetProvider`
+(`frontend/components/chat/chat-widget-context.tsx`) shared through `AppShell`. A session's
+title is now generated automatically from its first exchange (`generate_session_title`,
+replacing the old first-60-chars behavior), and long conversations are compacted in the
+background (`compact_history`, both SAQ jobs in `app/services/chat_service.py`) — older
+turns get folded into a running summary once a session passes 50 unreplayed messages, so
+what's sent to the LLM each turn stays bounded without deleting anything from the visible
+history.
+
+**Proactive GitHub repo suggestions — built**: a SAQ background job
+(`app/services/suggestion_service.py`) computes each user's top technologies
+(`app/services/portfolio_service.py`) and looks up real repos for them
+(`app/services/github_service.py`, cached cross-user in `github_repo_cache` via
+`app/services/github_cache_service.py` to stay well under GitHub's rate limit), storing
+results in `repo_suggestions` and surfacing them as a dismissable "Suggested for you" card
+on the Dashboard (`frontend/components/dashboard/suggested-repos-card.tsx`). Triggered
+both on project edits (`app/routers/projects.py`) and a 20-minute catch-up cron
+(`app/workers/suggestion_refresh.py`). Shares one no-repeat record with Jarvis's own live
+`github_search` tool, so a repo already suggested to a user — via chat or the dashboard —
+is never suggested to them again.
+
 **Profile page — built**: `/profile` (`frontend/app/(app)/profile/`, backend
 `app/routers/profile.py`), entirely optional CV-style content with the same
 propose-then-accept "Enhance with AI" pattern as the project form, adapted for its plain
-(non-rich-text) bio fields.
+(non-rich-text) bio fields, including an optional free-text instruction prompt before
+generating a suggestion.

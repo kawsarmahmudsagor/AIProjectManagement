@@ -63,7 +63,9 @@ async def enhance_field(
     if payload.field not in ENHANCEABLE_FIELDS:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"'{payload.field}' is not enhanceable")
     try:
-        text = await profile_service.enhance_field(db, user, payload.field, payload.target_text)
+        text = await profile_service.enhance_field(
+            db, user, payload.field, payload.target_text, payload.instruction
+        )
     except ProviderError as exc:
         raise HTTPException(422, {"code": exc.code, "message": exc.message}) from exc
     return ProfileEnhanceResponse(text=text)

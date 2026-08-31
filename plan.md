@@ -720,6 +720,203 @@ verified project fact Jarvis can assert back to the user.
 
 ---
 
+## Part G — Conversation management (built after the plan above)
+
+Real usage surfaced a need not in the original scope: managing more than one ongoing
+conversation, and keeping long conversations from blowing out the LLM's context window.
+Both are additive to Part A–F, gated by nothing new (no toggle) — they apply to every
+conversation.
+
+### G.1 `chat_sessions`/`chat_messages` additions
+
+```python
+# ChatSession
+starred: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+context_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+summarized_through_message_id: Mapped[UUID | None] = mapped_column(
+    ForeignKey("chat_messages.id", ondelete="SET NULL"), nullable=True)
+
+# ChatMessage
+sequence: Mapped[int] = mapped_column(BigInteger, Identity(), nullable=False, unique=True, index=True)
+```
+
+`sequence` replaces `created_at` as the ordering key for `ChatSession.messages` and history
+replay — `created_at` is useless as a tiebreaker since Postgres fixes `now()` for the whole
+transaction, so every row written in one turn (assistant reply + its tool messages) shares
+one `created_at`.
+
+### G.2 History compaction
+
+`context_summary`/`summarized_through_message_id` implement a rolling summary so a long
+conversation doesn't replay its entire history to the LLM every turn:
+
+- After each SSE turn, `routers/chat.py` checks
+  `chat_service.unsummarized_message_count(...) > chat_service.COMPACTION_THRESHOLD` (50)
+  and, if exceeded, enqueues the `compact_history` SAQ job (120s timeout) — same
+  fire-and-forget pattern as title generation below.
+- `compact_history` keeps the most recent `_COMPACTION_KEEP_RECENT` (10) unsummarized
+  messages untouched, folds everything older into a new `context_summary` (merging with any
+  prior summary) via an LLM call (`build_compaction_prompt`), and advances
+  `summarized_through_message_id` to the new cutoff.
+- `chat_service._build_history` takes only the rows after `summarized_through_message_id`
+  and, if a summary exists, prepends a synthetic `SystemMessage("Summary of earlier
+  conversation:\n\n<context_summary>")` before them — this replayed sequence, not the raw
+  full history, is what's sent to the LLM. The DB rows and the chat UI are untouched; only
+  what's replayed to the model shrinks.
+- Idempotent-safe to double-run; a failed compaction run is swallowed (`noqa: BLE001`, per
+  `chat_service.py`'s existing "a failed background job must never crash the job" pattern)
+  rather than surfaced — worst case a session stays uncompacted one cycle longer.
+
+### G.3 Auto-generated session titles
+
+Replaces the original "first 60 chars of the user's first message" title (B.5): after each
+SSE turn, `routers/chat.py` calls `chat_service.needs_title_generation` (true while
+`session.title == "New chat"`) and, if so, enqueues `generate_session_title` (60s timeout).
+The job re-checks the title is still `"New chat"` (no-op otherwise, so it never clobbers a
+session someone already renamed), takes the first user/assistant message pair, prompts the
+user's configured chat LLM for a 3–6 word title with no quotes/punctuation
+(`build_title_generation_prompt`), and sets `session.title` (truncated to 200 chars).
+
+### G.4 New/changed `/chat` endpoints
+
+```
+POST   /chat/sessions/new                            -> ChatSessionOut
+                             -- unconditionally starts a new session (widget's "New chat"),
+                                vs. POST /chat/sessions which still resumes the current one
+
+GET    /chat/sessions       ?q=&starred_only=&sort=&page=&page_size=
+                             -> {items: [ChatSessionOut], total}
+                             -- q: ILIKE title search. starred_only: bool, default false.
+                                sort: asc|desc by last_message_at, default desc.
+
+PATCH  /chat/sessions/{id}/star   {starred: bool}      -> ChatSessionOut
+
+POST   /chat/sessions/{id}/activate                    -> ChatSessionOut
+                             -- bumps last_message_at to now with no message changes,
+                                making that session "current" again — powers "resume this
+                                conversation" from the Conversations page below
+```
+
+`ChatSessionOut` gains `starred: bool`.
+
+### G.5 Frontend — Conversations page + shared widget state
+
+- `app/(app)/conversations/page.tsx` (new route) lists every session, with search (`q`),
+  a starred-only filter, and sort — all URL-param driven, mirroring the existing
+  `ProjectSearch` convention. Composed of `components/conversations/`:
+  `conversation-search.tsx`, `conversation-filters.tsx`, `conversation-list.tsx`,
+  `star-toggle-button.tsx`, `delete-conversation-button.tsx` (delete behind
+  `ConfirmPopover`, matching existing confirm-destructive-action conventions elsewhere).
+- Clicking a conversation calls `activateChatSession`, invalidates the `["chat","session"]`
+  query, then opens the floating widget on it.
+- **`components/chat/chat-widget-context.tsx`** (new) — a `ChatWidgetProvider`/
+  `useChatWidget()` context lifting the widget's open/closed state up to `AppShell`
+  (wrapping the whole shell), so a page other than the widget itself (the Conversations
+  page) can call `open()` without prop-drilling through the layout. `AppShell` also gains a
+  "Conversations" sidebar nav entry between Dashboard and Profile.
+- `dashboard/page.tsx` gains a `RecentConversationsCard` shortcut into `/conversations`.
+- `ChatWidget`/`useChatStream` reset pending/draft state when the active `sessionId`
+  changes, so switching sessions from the Conversations page doesn't leave stale state from
+  whatever was open before.
+
+---
+
+## Part H — Proactive GitHub Repo Suggestions
+
+Directly implements the original design's aspiration (Context, bullet 5: "Optionally
+suggests GitHub repos *proactively* ... not just on request") beyond what B.3's
+prompt-level `CHATBOT_PREEMPTIVE_ON` instruction alone can guarantee — that instruction
+only ever gives the *model* permission to volunteer a repo mid-conversation; nothing ran
+independently of an active chat turn. This part adds a real background computation, surfaced
+on the Dashboard instead of in chat, sharing infrastructure with Part B/G rather than
+introducing a new job system.
+
+### H.1 Data model
+
+```python
+class GithubRepoCache(Base, UUIDPk):
+    """Shared, cross-user cache of live GitHub results, keyed by lowercased technology —
+    overlapping technologies across many users' portfolios should cost one GitHub call per
+    TTL window, not N."""
+    technology: Mapped[str]          # unique, indexed
+    repos: Mapped[list[dict]]        # JSON
+    fetched_at: Mapped[datetime]
+    expires_at: Mapped[datetime]
+
+class RepoSuggestion(Base, UUIDPk):
+    """One row per (user, technology, repo) ever suggested to that user — both the
+    dashboard card's content and the no-repeat log Jarvis's own github_search tool checks
+    against (H.4). Unique on (user_id, technology, repo_full_name)."""
+    user_id: Mapped[UUID]            # FK -> users, cascade
+    technology: Mapped[str]          # lowercased key
+    technology_display: Mapped[str]  # original casing, for UI
+    repo_full_name: Mapped[str]
+    repo: Mapped[dict]               # JSON — same shape github_search already returns
+    source: Mapped[SuggestionSource] # "dashboard" | "chat"
+    rank: Mapped[int]
+    computed_at: Mapped[datetime]
+    expires_at: Mapped[datetime]
+    dismissed: Mapped[bool]
+    dismissed_at: Mapped[datetime | None]
+```
+
+The no-repeat check queries by `(user_id, repo_full_name)` alone, ignoring
+`technology`/`source` — a repo already suggested under one technology (or via chat) is
+never re-suggested under a different one either.
+
+### H.2 Shared services (extracted from the Part B tools, not duplicated)
+
+`portfolio_analysis`'s `technology_frequency` branch and `github_search`'s HTTP call
+(B.2) were closures inside `build_tools(db, user_id)`, unusable outside a chat turn.
+Extracted into plain async functions the SAQ job and the LangChain tools both call:
+
+- `app/services/portfolio_service.py` — `compute_technology_frequency(db, user_id)`.
+- `app/services/github_service.py` — `search_github_repos(query, limit)`, same
+  quality bar as before (min stars, not archived, freshness window).
+- `app/services/github_cache_service.py` — `get_cached_repos(db, technology, limit)`
+  wraps the above with the `GithubRepoCache` TTL cache and in-process call pacing
+  (target: comfortably under GitHub's 30 req/min authenticated budget), falling back to a
+  stale cache row rather than an empty result on a live-call error.
+- `app/services/suggestion_service.py` — `recompute_user_suggestions`,
+  `list_active_suggestions`, `dismiss_suggestion`, `find_stale_user_ids`,
+  `recompute_stale_suggestions`, plus the shared `get_suggested_repo_full_names`/
+  `record_chat_suggestions` pair used by H.4.
+
+### H.3 Triggers
+
+- **Event-driven**: `routers/projects.py` enqueues `recompute_user_suggestions` (SAQ,
+  deduped by a per-user key so rapid edits collapse into one job) after a project create,
+  a technologies-changing update, or a delete — only when the user's
+  `chatbot_preemptive_github_suggestions` toggle is on.
+- **Periodic catch-up**: a new cron job (`app/workers/suggestion_refresh.py`,
+  `refresh_stale_suggestions`, every 20 minutes — longer than `reap_stale_jobs`'s 5, since
+  this one makes real outbound GitHub calls) recomputes for any toggled-on user whose
+  suggestions are missing or older than the TTL, batched and rate-limit-aware, stopping
+  the batch early on an actual 403/429 rather than continuing to hammer GitHub.
+- Recomputation itself is debounced per user regardless of trigger (skipped if already
+  computed within the last few hours, unless forced by the cron path).
+
+### H.4 Sharing the no-repeat guarantee with chat
+
+`chat_tools.github_search` (B.2) now filters its live results against
+`get_suggested_repo_full_names(db, user_id)` before returning them, and logs whatever it
+actually surfaces via `record_chat_suggestions` — so a repo Jarvis mentions in chat is
+recorded the same way a dashboard suggestion is, and vice versa. Neither surface can ever
+repeat a repo the other already showed that user.
+
+### H.5 Endpoints and frontend
+
+```
+GET    /suggestions/github                         -> [RepoSuggestionOut]  (non-dismissed only)
+POST   /suggestions/github/{id}/dismiss             -> RepoSuggestionOut
+```
+
+`frontend/components/dashboard/suggested-repos-card.tsx` renders the list on the Dashboard
+(next to `RecentConversationsCard`, Part G.5) with an optimistic dismiss action;
+`frontend/lib/suggestions.ts` is the typed API wrapper.
+
+---
+
 ## Verification plan
 
 1. **Migration**: `alembic upgrade head` applies cleanly against a dev Postgres; `alembic
@@ -751,3 +948,18 @@ verified project fact Jarvis can assert back to the user.
     ask "what should I explore next?" with no other context → confirm the GitHub suggestions lean
     toward that speciality, and confirm Jarvis never states the speciality back as if it were a
     verified project fact.
+11. **Conversation management**: create several sessions, star/unstar one, search by title, sort
+    newest/oldest, delete one → confirm the list and the Dashboard's recent-conversations card stay
+    in sync. Resume a non-current session from `/conversations` → confirm the floating widget opens
+    on that session, not whichever one was last active. Send enough turns to cross the 50-message
+    compaction threshold → confirm `compact_history` runs, the session's visible message history is
+    unchanged, and later replies still reference facts from the compacted-away turns. Leave a new
+    session's title as "New chat" through one exchange → confirm it's replaced with a short
+    generated title, and that renaming it (if supported) or a title someone already set is never
+    clobbered by a later run.
+12. **Proactive suggestions**: with the toggle on, add a project with a new technology → confirm a
+    suggestion job runs and the Dashboard's "Suggested for you" card populates without the user ever
+    opening chat. Dismiss one → confirm it never reappears, including after editing the project
+    again. Ask Jarvis in chat for a recommendation on the same technology → confirm it doesn't repeat
+    a repo already shown on the dashboard (and vice versa on the next recompute). Turn the toggle off
+    → confirm no new suggestions are generated on further edits.

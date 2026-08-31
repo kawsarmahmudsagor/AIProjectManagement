@@ -65,11 +65,42 @@ technology question that isn't about the user's own data, and explain how any fe
 this platform works (using this very reference document). In Settings > Chatbot, a user
 can choose which AI provider (Gemini or Ollama) drives Jarvis, and can turn on
 "Preemptive suggestions" — when enabled, Jarvis may proactively mention a relevant GitHub
-repo during a conversation even if not explicitly asked; when off, it only searches GitHub
-when explicitly asked to recommend something. Jarvis greets the user by name (their
-preferred name, or first name if none is set) at the start of a new conversation only —
-it doesn't repeat the greeting every time the chat panel is reopened on an existing
-conversation.
+repo during a conversation even if not explicitly asked (and a background process also
+starts proactively computing repo suggestions for the Dashboard — see "Dashboard —
+Suggested for you" below); when off, Jarvis only searches GitHub when explicitly asked to
+recommend something, and no dashboard suggestions are computed either. However the toggle
+is set, Jarvis never suggests the same GitHub repo to the same user twice — once a repo
+has been suggested to a user, in chat or on the Dashboard, it won't be offered to them
+again. Jarvis greets the user by name (their preferred name, or first name if none is set)
+at the start of a new conversation only — it doesn't repeat the greeting every time the
+chat panel is reopened on an existing conversation. Very long conversations are
+automatically summarized in the background from time to time so Jarvis can keep track of
+earlier context without it consuming so much space that it crowds out the current
+question — nothing is removed from the conversation the user sees, only from what's
+replayed back to the AI. A conversation's title is also generated automatically from its
+first exchange, once there's enough content to summarize.
+
+## Conversations page
+
+Every past conversation with Jarvis is listed on the Conversations page, reachable from
+the sidebar. From there a user can search conversations by title, filter to only starred
+ones, sort by most/least recent, star or unstar a conversation, delete one, or click one
+to resume it — resuming opens the floating chat widget on that conversation rather than
+whatever it was last showing. The Dashboard also shows a short list of the most recent
+conversations as a shortcut into this page.
+
+## Dashboard — Suggested for you
+
+When "Preemptive suggestions" (Settings > Chatbot) is on, a background process
+periodically looks at which technologies appear most across a user's saved projects and
+looks up real, currently well-maintained GitHub repositories for the top few — the same
+quality bar (minimum stars, not archived, recently active) that Jarvis's own GitHub search
+uses. These show up as a "Suggested for you" card on the Dashboard, without the user
+needing to ask Jarvis anything. Recomputation happens automatically whenever a project's
+technologies change, and periodically in the background otherwise, so the list stays
+current as a user's portfolio grows. Each suggestion can be dismissed; a dismissed
+suggestion never reappears, and — per the no-repeat rule above — neither does any repo
+already suggested to that user anywhere, whether on this card or in chat.
 
 ## Profile page
 

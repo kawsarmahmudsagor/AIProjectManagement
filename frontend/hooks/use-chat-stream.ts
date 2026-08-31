@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useShowProviderErrorModal } from "@/components/layout/provider-error-modal";
 import { ApiError } from "@/lib/api-client";
 import { streamChatTurn, type ChatMessage } from "@/lib/chat";
@@ -38,6 +38,24 @@ export function useChatStream({
   const [draft, setDraft] = useState<ChatDraft>({ status: "idle" });
   const abortRef = useRef<AbortController | null>(null);
   const showProviderError = useShowProviderErrorModal();
+
+  // sessionId can now change while a stream is in flight (resuming a different
+  // conversation from the Conversations page) — abort the old stream so it can't keep
+  // rendering against a session this hook has moved past. Real subscription-cleanup
+  // work, so this stays an effect (unlike the draft reset below).
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+    };
+  }, [sessionId]);
+
+  // Render-phase state adjustment (react.dev/learn/you-might-not-need-an-effect),
+  // matching ConfirmPopover's prevOpen pattern, rather than a setState-in-effect.
+  const [prevSessionId, setPrevSessionId] = useState(sessionId);
+  if (prevSessionId !== sessionId) {
+    setPrevSessionId(sessionId);
+    setDraft({ status: "idle" });
+  }
 
   const send = async (content: string, provider?: ChatProvider) => {
     if (!sessionId || !content.trim()) return;

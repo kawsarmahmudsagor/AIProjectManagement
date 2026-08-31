@@ -31,8 +31,18 @@ class ChatSessionOut(BaseModel):
     id: UUID
     title: str
     last_message_at: datetime
+    starred: bool
 
     model_config = {"from_attributes": True}
+
+
+class ChatSessionListResponse(BaseModel):
+    items: list[ChatSessionOut]
+    total: int
+
+
+class ChatSessionStarUpdate(BaseModel):
+    starred: bool
 
 
 @dataclass

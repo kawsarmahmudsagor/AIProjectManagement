@@ -1,4 +1,4 @@
-import { buildBffHeaders, parseApiError } from "@/lib/api-client";
+import { apiFetch, buildBffHeaders, parseApiError } from "@/lib/api-client";
 import { parseSseStream } from "@/lib/sse";
 import type { ChatProvider } from "@/lib/types";
 
@@ -27,7 +27,54 @@ export type ChatMessage = {
   created_at: string;
 };
 
-export type ChatSession = { id: string; title: string; last_message_at: string };
+export type ChatSession = { id: string; title: string; last_message_at: string; starred: boolean };
+
+export type ChatSessionListResponse = { items: ChatSession[]; total: number };
+
+export async function listChatSessions(
+  params: {
+    q?: string;
+    starredOnly?: boolean;
+    sort?: "asc" | "desc";
+    page?: number;
+    pageSize?: number;
+  } = {},
+): Promise<ChatSessionListResponse> {
+  const qs = new URLSearchParams();
+  if (params.q) qs.set("q", params.q);
+  if (params.starredOnly) qs.set("starred_only", "true");
+  if (params.sort) qs.set("sort", params.sort);
+  qs.set("page", String(params.page ?? 1));
+  qs.set("page_size", String(params.pageSize ?? 20));
+  return apiFetch<ChatSessionListResponse>(`chat/sessions?${qs.toString()}`);
+}
+
+export async function setSessionStarred(sessionId: string, starred: boolean): Promise<ChatSession> {
+  return apiFetch<ChatSession>(`chat/sessions/${sessionId}/star`, {
+    method: "PATCH",
+    body: JSON.stringify({ starred }),
+  });
+}
+
+export async function deleteChatSession(sessionId: string): Promise<void> {
+  return apiFetch<void>(`chat/sessions/${sessionId}`, { method: "DELETE" });
+}
+
+export async function activateChatSession(sessionId: string): Promise<ChatSession> {
+  return apiFetch<ChatSession>(`chat/sessions/${sessionId}/activate`, { method: "POST" });
+}
+
+export async function createNewChatSession(signal?: AbortSignal): Promise<ChatSession> {
+  const headers = buildBffHeaders("POST", {});
+  const res = await fetch("/api/bff/chat/sessions/new", {
+    method: "POST",
+    headers,
+    credentials: "same-origin",
+    signal,
+  });
+  if (!res.ok) throw await parseApiError(res);
+  return res.json();
+}
 
 export async function getOrCreateCurrentSession(signal?: AbortSignal): Promise<ChatSession> {
   const headers = buildBffHeaders("POST", {});

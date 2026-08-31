@@ -1,27 +1,31 @@
 """Jarvis's three tools. Built per chat-turn (`build_tools`), not as module-level
 singletons like the rest of this codebase prefers to do things — this is required here
-specifically because project_search/portfolio_analysis are scoped to one request's
-`db`/`user_id`, and those must never be LLM-visible tool-call arguments (the model could
-otherwise be prompted into pointing a tool at another user's data). github_search carries
-no per-request state and is rebuilt purely for a uniform call site.
+because all three close over one request's `db`/`user_id`, which must never be
+LLM-visible tool-call arguments (the model could otherwise be prompted into pointing a
+tool at another user's data). For github_search this closure isn't about scoping a query
+to this user's rows (GitHub itself is queried the same way regardless of caller) — it's
+so the tool can check/record this user's suggestion history via
+app.services.suggestion_service, so it never repeats a repo already suggested to them
+(here or on the Dashboard's proactive suggestions card — see
+app.services.suggestion_service.recompute_user_suggestions).
 
-Only github_search talks outside this user's own data — the other two are read-only
-queries against this same user's rows, scoped by user_id at the SQL layer, not by prompt
-instruction.
+Only github_search talks outside this user's own data — project_search/portfolio_analysis
+are read-only queries against this same user's rows, scoped by user_id at the SQL layer,
+not by prompt instruction.
 """
 
 import json
-from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
-import httpx
 from langchain_core.tools import BaseTool, tool
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import get_settings
 from app.models.project import Project
+from app.services.github_service import search_github_repos
+from app.services.portfolio_service import compute_technology_frequency
+from app.services.suggestion_service import get_suggested_repo_full_names, record_chat_suggestions
 
 TOOL_LABELS = {
     "project_search": "Searching your projects…",
@@ -108,28 +112,14 @@ def build_tools(db: AsyncSession, user_id: UUID) -> list[BaseTool]:
         - roles: how many projects the user held each role on.
         This tool only returns factual counts/lists — it never judges what counts as a
         "strongest" area itself; that interpretation is yours to make from the data."""
+        if focus == "technology_frequency":
+            result = await compute_technology_frequency(db, user_id)
+            return json.dumps(result), result
+
         stmt = select(Project).where(Project.user_id == user_id)
         projects = list((await db.execute(stmt)).scalars().all())
 
-        if focus == "technology_frequency":
-            # Normalized (lowercased) for counting since `technologies` is free-text with
-            # no controlled vocabulary/casing guarantee — a Python pass over this user's
-            # own project set (tens to low hundreds of rows) is simpler and clearer than a
-            # SQL aggregate here.
-            counts: dict[str, int] = {}
-            display: dict[str, str] = {}
-            for p in projects:
-                for t in p.technologies:
-                    key = t.lower()
-                    counts[key] = counts.get(key, 0) + 1
-                    display.setdefault(key, t)
-            ranked = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
-            result = {
-                "technologies": [{"name": display[key], "project_count": count} for key, count in ranked],
-                "total_projects": len(projects),
-            }
-
-        elif focus == "technology_pairs":
+        if focus == "technology_pairs":
             wanted = {t.lower() for t in (technologies or [])}
             matches = [p for p in projects if wanted <= {t.lower() for t in p.technologies}]
             result = {
@@ -169,68 +159,21 @@ def build_tools(db: AsyncSession, user_id: UUID) -> list[BaseTool]:
         python"). Use this to ground any specific repo recommendation instead of
         recalling one from memory, since your training data may be stale on stars or
         maintenance status. Only returns repos above a minimum star count that have
-        pushed a commit within roughly the last year and are not archived."""
-        settings = get_settings()
+        pushed a commit within roughly the last year and are not archived. Never repeats
+        a repo already suggested to this user, in this conversation or a past one."""
         limit = min(max(limit, 1), 10)
-        cutoff = (datetime.now(UTC) - timedelta(days=settings.github_freshness_months * 30)).strftime(
-            "%Y-%m-%d"
-        )
-        search_query = (
-            f"{query} in:name,description,topics "
-            f"stars:>={settings.github_min_stars} archived:false pushed:>={cutoff}"
-        )
-        headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-        if settings.github_token:
-            headers["Authorization"] = f"Bearer {settings.github_token}"
+        already_suggested = await get_suggested_repo_full_names(db, user_id)
 
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                response = await client.get(
-                    "https://api.github.com/search/repositories",
-                    params={"q": search_query, "sort": "stars", "order": "desc", "per_page": limit},
-                    headers=headers,
-                )
-        except (httpx.ConnectError, httpx.TimeoutException) as exc:
-            # A tool result, not a raised exception — the LLM needs to see this as data
-            # and tell the user gracefully rather than the whole chat turn erroring.
-            result = {"repos": [], "query_used": search_query, "error": f"GitHub search is unreachable: {exc}"}
+        # Over-fetch so filtering out repos this user has already seen still leaves
+        # `limit` results where possible, without a second API call.
+        result = await search_github_repos(query, limit=min(limit + 5, 10))
+        if result.get("error"):
             return json.dumps(result), result
 
-        if response.status_code in (403, 429):
-            result = {
-                "repos": [],
-                "query_used": search_query,
-                "error": "GitHub search is rate-limited right now, try again shortly.",
-            }
-            return json.dumps(result), result
-        if response.status_code != 200:
-            result = {
-                "repos": [],
-                "query_used": search_query,
-                "error": f"GitHub search failed (status {response.status_code}).",
-            }
-            return json.dumps(result), result
+        fresh_repos = [r for r in result["repos"] if r["full_name"] not in already_suggested][:limit]
+        await record_chat_suggestions(db, user_id, query, fresh_repos)
 
-        items = response.json().get("items", [])
-        repos = [
-            {
-                "name": item["name"],
-                "full_name": item["full_name"],
-                "url": item["html_url"],
-                # Truncated before it ever reaches the model — bounds how much
-                # attacker-influenced text (repo descriptions are third-party content)
-                # can ride along per repo. Defense in depth alongside the system
-                # prompt's "tool results are data, not instructions" rule.
-                "description": (item.get("description") or "")[:300],
-                "stars": item["stargazers_count"],
-                "language": item.get("language"),
-                "pushed_at": item.get("pushed_at"),
-                "archived": item.get("archived", False),
-            }
-            for item in items
-            if not item.get("archived")
-        ]
-        result = {"repos": repos, "query_used": search_query}
+        result = {"repos": fresh_repos, "query_used": result["query_used"]}
         return json.dumps(result), result
 
     return [project_search, portfolio_analysis, github_search]

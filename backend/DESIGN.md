@@ -17,7 +17,8 @@ backend/
 ├── .env.example
 ├── docker-compose.yml            (Postgres, at repo root actually — see top-level)
 └── app/
-    ├── main.py                   FastAPI app factory, CORS, lifespan (DB, Playwright browser)
+    ├── main.py                   FastAPI app factory, CORS, lifespan (DB, Playwright browser,
+    │                              SAQ bridge + auto-spawned worker process)
     ├── core/
     │   ├── config.py             pydantic-settings Settings (env-driven)
     │   ├── database.py           async engine/session, Base, get_db dependency
@@ -25,37 +26,64 @@ backend/
     │   └── deps.py                get_current_user, get_settings, pagination
     ├── models/                   SQLAlchemy 2.0 declarative models
     │   ├── base.py                UUIDPk + Timestamps mixins
-    │   ├── user.py
+    │   ├── user.py                name fields, chat_provider, preemptive-suggestions toggle
     │   ├── project.py
     │   ├── document.py
     │   ├── extraction_job.py
-    │   └── ai_provider_setting.py
+    │   ├── ai_provider_setting.py
+    │   ├── chat.py                 ChatSession, ChatMessage, ChatRole — see §2, Jarvis plan.md Part A/G
+    │   ├── profile.py              UserProfile — see §2, plan.md Part E
+    │   ├── github_repo_cache.py    shared cross-user GitHub-result cache — plan.md Part H
+    │   └── repo_suggestion.py      per-user suggested-repo log — plan.md Part H
     ├── schemas/                  Pydantic request/response models
     │   ├── common.py              RichText, PageParams
     │   ├── auth.py  project.py  document.py  job.py  ai_settings.py
+    │   ├── chat.py  profile.py  suggestion.py
     ├── routers/                  one router per resource, included in main.py
     │   ├── auth.py  projects.py  documents.py  jobs.py  ai.py  ai_settings.py  export.py
+    │   ├── chat.py  profile.py  suggestions.py
     ├── services/                 business logic, framework-agnostic where possible
     │   ├── project_service.py
     │   ├── extraction_service.py  orchestrates ingest -> provider -> persist job result
-    │   └── export_service.py
+    │   ├── export_service.py
+    │   ├── chat_service.py         session lifecycle, SSE turn orchestration, title-gen,
+    │   │                            history compaction — see §6, plan.md Part B/G
+    │   ├── profile_service.py      profile CRUD, photo storage, enhance orchestration,
+    │   │                            build_context_digest() for Jarvis — plan.md Part E
+    │   ├── portfolio_service.py    technology-frequency aggregation, shared by the
+    │   │                            portfolio_analysis tool and the suggestion job
+    │   ├── github_service.py       live GitHub repo search — shared by github_search
+    │   │                            and the suggestion job's cache layer
+    │   ├── github_cache_service.py TTL cache + call-pacing wrapper around github_service
+    │   └── suggestion_service.py   proactive-suggestion computation, dismissal, no-repeat
+    │                                log shared with chat_tools.github_search — plan.md Part H
     ├── providers/                 the AI abstraction — see §4
-    │   ├── base.py                 Protocol: extract(), rewrite(), test_connection()
+    │   ├── base.py                 Protocol: extract(), rewrite(), test_connection(), get_chat_model()
     │   ├── gemini.py
     │   ├── ollama.py
-    │   ├── prompts.py              persona-keyed system prompts + rewrite prompt builder
-    │   └── registry.py             resolves a user's configured provider
+    │   ├── prompts.py              persona-keyed system prompts, rewrite prompt builder,
+    │   │                            Jarvis's chatbot system prompt, profile-enhance prompts,
+    │   │                            shared AGENT_SAFETY_BOUNDARIES block
+    │   └── registry.py             resolves a user's configured provider (purpose: extract|rewrite|chat)
     ├── agents/                    LangGraph orchestration — see §4
-    │   └── rewrite_graph.py        one-node StateGraph wrapping provider.rewrite(); the
-    │                                seam a future chatbot graph extends
+    │   ├── rewrite_graph.py        one-node StateGraph wrapping provider.rewrite()
+    │   ├── chatbot_graph.py        Jarvis: per-request ReAct-style tool-calling graph — see §4
+    │   ├── chat_tools.py           project_search, portfolio_analysis, github_search tools
+    │   └── chat_app_guide.md       hand-maintained knowledge doc baked into Jarvis's system
+    │                                prompt — the only place platform-feature answers come from
     ├── ingest/
     │   └── extract.py             magic-byte sniff, pdfplumber/docx2python/mammoth, .doc reject
     ├── render/
     │   ├── docx.py                python-docx + html-for-docx
     │   └── pdf.py                 PdfRenderer protocol, Playwright backend
-    └── workers/
-        ├── settings.py            SAQ Queue + function registry (Postgres backend)
-        └── tasks.py               run_extraction_job(ctx, job_id) — thin wrapper over extraction_service
+    └── workers/                   see §6
+        ├── settings.py            SAQ Queue + function/cron registry (Postgres backend)
+        ├── bridge.py              dedicated Selector-event-loop thread SAQ calls run on,
+        │                          bridging from FastAPI's Proactor-loop process (Windows)
+        ├── worker_process.py      auto-spawns the SAQ worker as a child process on startup
+        ├── tasks.py               thin per-task wrappers over the services above
+        ├── stale_jobs.py          reap_stale_jobs cron — terminates a stuck extraction job
+        └── suggestion_refresh.py  refresh_stale_suggestions cron — plan.md Part H
 ```
 
 Each router is deliberately thin: parse request → call one service function → map to
@@ -75,6 +103,13 @@ users
   id (uuid, pk)  email (unique, citext)  hashed_password
   agent_persona (enum: business_analyst | technical_developer, default business_analyst)
                  -- which system prompt (providers/prompts.py) frames extraction + rewrite
+  first_name  middle_name (nullable)  last_name (nullable)  preferred_name (nullable)
+                 -- only first_name is required (registration); Jarvis's greeting uses
+                    preferred_name, falling back to first_name — never the others
+  chat_provider (enum: gemini | ollama, default gemini)       -- which connection drives Jarvis
+  chatbot_preemptive_github_suggestions (bool, default false) -- Settings > Chatbot toggle;
+                 -- gates both in-chat volunteered repo suggestions and the proactive
+                    suggestion background job (§6, plan.md Part H)
   created_at  updated_at
 
 projects
@@ -116,6 +151,56 @@ ai_provider_settings
   is_default (bool)
   created_at  updated_at
   unique(user_id, provider)
+
+chat_sessions
+  id (uuid, pk)  user_id (fk -> users, cascade)
+  title (default "New chat")     -- auto-generated from the first exchange once there's
+                                     enough content (chat_service.generate_session_title);
+                                     never overwritten once it's no longer "New chat"
+  starred (bool, default false)
+  last_message_at
+  context_summary (nullable text)             -- rolling LLM-written summary of older turns
+  summarized_through_message_id (fk -> chat_messages, ON DELETE SET NULL, nullable)
+                                                -- cutoff: rows after this are replayed raw
+  created_at  updated_at
+
+chat_messages
+  id (uuid, pk)  session_id (fk -> chat_sessions, cascade)
+  sequence (bigint, IDENTITY, unique, indexed)  -- strict insertion order; created_at can't
+                                                     serve this role since one turn's rows
+                                                     share an identical transaction timestamp
+  role (enum: user | assistant | tool)
+  content (text)
+  tool_calls (JSONB, nullable)    -- assistant messages that called a tool
+  tool_call_id (nullable)  tool_name (nullable)  tool_result (JSONB, nullable)  -- tool messages only
+  created_at  updated_at
+
+user_profiles
+  id (uuid, pk)  user_id (fk -> users, cascade, unique)   -- 1:1, auto-created empty at registration
+  photo_path (nullable)  designation (nullable)  team (nullable)
+  organization (nullable)  speciality (nullable)
+  primary_skills (ARRAY(String))  secondary_skills (ARRAY(String))
+  professional_biography  work_experience_summary  career_objective
+  key_strengths  responsibilities                     -- plain text, own char cap each,
+                                                           not the {html,text} RichText pair
+  created_at  updated_at
+
+github_repo_cache
+  id (uuid, pk)  technology (unique, indexed, lowercased)
+  repos (JSON)  fetched_at  expires_at
+                 -- shared across every user; keeps overlapping technologies (many users'
+                    portfolios repeat "python", "react", ...) to one live GitHub call per
+                    TTL window rather than one per user — plan.md Part H
+
+repo_suggestions
+  id (uuid, pk)  user_id (fk -> users, cascade)
+  technology (lowercased)  technology_display (original casing)
+  repo_full_name  repo (JSON)
+  source (enum: dashboard | chat)  rank (int)
+  computed_at  expires_at  dismissed (bool)  dismissed_at (nullable)
+  unique(user_id, technology, repo_full_name)
+                 -- one row per (user, technology, repo) ever suggested; also the no-repeat
+                    log chat_tools.github_search checks before offering a repo — plan.md Part H
 ```
 
 Storage for uploaded files and rendered exports: **local disk** under
@@ -164,6 +249,33 @@ POST   /ai-settings/{provider}/test                                    -> {ok, d
 
 GET    /projects/{id}/export?format=pdf|docx                           -> file stream,
                              Content-Disposition: attachment; filename="{project.name}.{ext}"
+
+POST   /chat/sessions                                                   -> ChatSessionOut
+                             -- idempotent: returns the user's current (most-recent) session,
+                                auto-creating one (with the greeting message) if none exists
+POST   /chat/sessions/new                                               -> ChatSessionOut
+                             -- unconditionally starts a brand-new session ("New chat" button)
+GET    /chat/sessions       ?q=&starred_only=&sort=asc|desc&page=&page_size= -> {items, total}
+PATCH  /chat/sessions/{id}/star     {starred: bool}                     -> ChatSessionOut
+POST   /chat/sessions/{id}/activate                                     -> ChatSessionOut
+                             -- bumps last_message_at; makes this session "current" again
+GET    /chat/sessions/{id}/messages                                     -> [ChatMessageOut]
+DELETE /chat/sessions/{id}                                              -> 204
+POST   /chat/sessions/{id}/messages   {content, provider?}              -> text/event-stream
+                             -- see §4/§6; SSE events: session_meta, token, tool_start,
+                                tool_end, done, error
+
+GET    /profile                                                         -> ProfileOut
+PATCH  /profile             {designation?, team?, organization?, speciality?,
+                              primary_skills?, secondary_skills?, first_name?, ...,
+                              professional_biography?, ...}              -> ProfileOut
+POST   /profile/enhance     {field, target_text, instruction?}          -> {text: str}
+POST   /profile/photo       multipart: file                             -> {photo_url}
+DELETE /profile/photo                                                   -> 204
+
+GET    /suggestions/github                                              -> [RepoSuggestionOut]
+                             -- this user's current non-dismissed proactive suggestions
+POST   /suggestions/github/{id}/dismiss                                 -> RepoSuggestionOut
 ```
 
 `POST /documents` returning immediately with a job id (rather than blocking on
@@ -207,6 +319,23 @@ first time. Extraction is **not** routed through LangGraph — it stays a direct
 `provider.extract(...)` call, since it already has its own job-status state machine (§2's
 `extraction_jobs.status`) and doesn't need a second one.
 
+**Jarvis (`app/agents/chatbot_graph.py`) is that anticipated second graph** — a standard
+ReAct-style loop (`START → agent → tools_condition → tools → agent → ... → END`) built from
+LangGraph's *prebuilt* pieces (`ToolNode`, `tools_condition`), not hand-rolled intent
+branching, with three bound tools (`app/agents/chat_tools.py`:
+`project_search`/`portfolio_analysis`/`github_search`). Unlike `rewrite_graph.py`, which is
+compiled once at module load, the chatbot graph is compiled **per request**
+(`_build_graph(tools)`) — two of the three tools close over that request's `db`/`user_id`
+rather than accepting them as LLM-visible arguments (the multi-tenancy safety boundary: a
+tool can't be prompted into reading another user's data), so the tool list itself is
+request-scoped. Compiling a 3-node graph per call is microseconds; this is a deliberate,
+documented deviation, not an oversight. Streaming uses
+`compiled_graph.astream_events(..., version="v2")`, translated into the SSE event stream
+listed alongside `POST /chat/sessions/{id}/messages` in §3. A model's streamed/final `content` can come back as `str` or as a list of content
+blocks (text/thinking/tool_use/...) depending on the provider — `stringify_content()`
+(`chatbot_graph.py`) extracts only the text blocks before anything reaches the frontend, or a
+non-string block round-trips through JSON as literal `"[object Object]"` garbage.
+
 ```python
 # app/providers/base.py
 from typing import Protocol
@@ -228,6 +357,10 @@ class LLMProvider(Protocol):
     async def rewrite(self, op: str, target_text: str, source_text: str | None,
                        char_limit: int | None, *, persona: AgentPersona) -> str: ...
     async def test_connection(self) -> ConnectionStatus: ...
+    def get_chat_model(self) -> BaseChatModel:
+        """Underlying LangChain chat model for open-ended conversation + tool-calling +
+        streaming — no structured-output binding. The one seam where Jarvis reaches below
+        the extract()/rewrite() abstraction."""
 ```
 
 `persona` (`models/user.AgentPersona` — `business_analyst` | `technical_developer`, the
@@ -238,6 +371,9 @@ frames the call — see "Prompt design" below.
 `ai_provider_settings` row for the requested (or default) provider, decrypt the API key
 via `core.security.decrypt()`, and construct `GeminiProvider`/`OllamaProvider`. Providers
 are cheap to construct (no persistent connection) so they're built per-call, not cached.
+`get_provider(..., purpose: Literal["extract","rewrite","chat"])` — `"chat"` behaves like
+`"rewrite"` for Ollama's cloud-tag handling (chat has no structured-output restriction, so
+an Ollama Cloud model is fine for it even though it's rejected for extraction, §Ollama below).
 
 ### Gemini (`providers/gemini.py`)
 
@@ -358,6 +494,26 @@ instructions stay in one place regardless of which model executes them:
 
   The frontend never receives an over-limit "accepted" value; API-level Pydantic
   validation on `RichText` also rejects it defensively even if this loop is bypassed.
+- **Jarvis's chatbot system prompt** (`build_chatbot_system_prompt`) is composed, not a
+  single static string: identity + grounding rules (any claim about the user's own
+  projects must come from a tool call this turn, never invented) + the verbatim contents
+  of `chat_app_guide.md` (so platform-feature questions never need a wasted tool
+  round-trip) + an optional profile-context digest (omitted entirely, not left as an empty
+  section, when the user's profile has nothing filled in) + one of two
+  `CHATBOT_PREEMPTIVE_ON`/`CHATBOT_PREEMPTIVE_OFF` blocks depending on the user's Settings
+  toggle. This is a **prompt-level** gate, not a tool-availability one — unbinding
+  `github_search` entirely would also block a user's *explicit* request for a
+  recommendation, which the toggle was never meant to affect.
+- **Profile field enhancement** (`PROFILE_FIELD_SPECS`) reuses this same generate-then-
+  verify-then-retry loop, one entry per bio field (`professional_biography`,
+  `work_experience_summary`, `career_objective`, `key_strengths`, `responsibilities`),
+  each with its own char cap and instruction, persona-aware like the project rewrite
+  prompts. The user can optionally supply free-text guidance (`instruction`) alongside the
+  target text, folded into the same prompt.
+- **`AGENT_SAFETY_BOUNDARIES`** — one shared block (politics, medical/legal/financial
+  advice, religion, identity topics, violence, self-harm handling) appended to every agent
+  prompt in this module, including Jarvis's — a content-boundary guardrail independent of
+  the grounding rules above.
 
 ## 5. Document parsing (`ingest/extract.py`)
 
@@ -397,37 +553,71 @@ no WSL2, just the Postgres you already have.
 
 ```python
 # app/workers/settings.py
-from saq import Queue
-from app.core.database import engine
-from app.workers.tasks import run_extraction_job
+from saq import CronJob, Queue
+from app.workers.tasks import (
+    compact_history, generate_session_title, recompute_user_suggestions, run_extraction_job,
+)
+from app.workers.stale_jobs import reap_stale_jobs
+from app.workers.suggestion_refresh import refresh_stale_suggestions
 
-queue = Queue.from_url(f"postgres+{settings.DATABASE_URL}")  # or Queue(pg_pool) per SAQ's postgres setup
+queue = Queue.from_url(_to_saq_url(settings.database_url))  # postgres:// DSN, not +asyncpg
 
 settings = {
     "queue": queue,
-    "functions": [run_extraction_job],
+    "functions": [run_extraction_job, generate_session_title, compact_history, recompute_user_suggestions],
     "concurrency": 4,
-    "startup": on_worker_startup,   # warm httpx clients, etc.
+    "cron_jobs": [
+        CronJob(reap_stale_jobs, cron="*/5 * * * *"),
+        CronJob(refresh_stale_suggestions, cron="*/20 * * * *"),  # makes real outbound
+                                       # GitHub calls, so a longer interval than the
+                                       # pure-DB-sweep reaper above — see plan.md Part H
+    ],
 }
 ```
 
 ```python
-# app/workers/tasks.py — thin wrapper; all real logic lives in the service and is
-# independently unit-testable with no queue involved
+# app/workers/tasks.py — thin wrappers; all real logic lives in the corresponding
+# service and is independently unit-testable with no queue involved
 async def run_extraction_job(ctx, job_id: str):
-    async with async_session() as db:
-        await ExtractionService(db).run(job_id)
+    async with async_session_factory() as db:
+        await _run_extraction_job(db, UUID(job_id))
 ```
 
-**Job state machine**: `queued → parsing → extracting → structuring → succeeded|failed`.
-The service updates `extraction_jobs.status` (and `started_at`/`finished_at`) at each
-transition so `GET /extraction-jobs/{id}` always reflects live progress for the frontend's
-poll — no separate "stage" table or pub/sub needed at this scale. `parsing` = document
-ingest running; `extracting` = provider call in flight; `structuring` = mapping the raw
-provider result onto the `ExtractionResult` schema and persisting. A crashed worker leaves
-a job stuck in a non-terminal state; a periodic SAQ cron job
-(`reap_stale_jobs`, every 5 min) marks any job with `status not in (succeeded, failed)` and
-`started_at < now() - 10min` as `failed/TIMEOUT` so the frontend's poll always terminates.
+**Full task roster**: `run_extraction_job` (document → AI extraction, §5), 
+`generate_session_title`/`compact_history` (Jarvis session housekeeping, plan.md Part G),
+`recompute_user_suggestions` (proactive GitHub suggestions, plan.md Part H). Each is
+enqueued via a matching `enqueue_*` helper in `workers/settings.py`, called from a router
+right after the triggering DB commit (e.g. `documents.py` after creating an
+`ExtractionJob` row, `projects.py` after a technologies-changing edit).
+
+**The Windows event-loop bridge** (`app/workers/bridge.py`): Playwright's driver needs
+`ProactorEventLoop` (subprocess support) while psycopg's async mode needs
+`SelectorEventLoop` (`add_reader`/`add_writer`) — a single asyncio loop can't be both on
+Windows. Since `app/main.py`'s lifespan already commits the FastAPI process's main loop to
+Proactor for Playwright, every `queue.enqueue(...)` call from that process instead runs on
+a dedicated background thread with its own `SelectorEventLoop`, via `bridge.run_async(...)`
+— never awaited directly on the main loop. The standalone SAQ worker process doesn't need
+this: it never touches Playwright, so it sets `WindowsSelectorEventLoopPolicy` directly.
+
+**No separate worker terminal needed for local dev**: `app/workers/worker_process.py`
+auto-spawns `saq app.workers.settings.settings` as a real child process from
+`app/main.py`'s lifespan on `uvicorn` startup (a child *process*, not an in-process thread
+— SAQ's worker loop and FastAPI's can't safely share one Python process's asyncio state
+here). Running `saq app.workers.settings.settings --web` manually alongside it is still
+supported and safe, purely to get SAQ's built-in queue/worker dashboard on `:8080`.
+
+**Extraction job state machine**: `queued → parsing → extracting → structuring →
+succeeded|failed`. The service updates `extraction_jobs.status` (and
+`started_at`/`finished_at`) at each transition so `GET /extraction-jobs/{id}` always
+reflects live progress for the frontend's poll — no separate "stage" table or pub/sub
+needed at this scale. `parsing` = document ingest running; `extracting` = provider call in
+flight; `structuring` = mapping the raw provider result onto the `ExtractionResult` schema
+and persisting. A crashed worker leaves a job stuck in a non-terminal state; the
+`reap_stale_jobs` cron (every 5 min) marks any job with `status not in (succeeded, failed)`
+and `started_at < now() - 10min` as `failed/TIMEOUT` so the frontend's poll always
+terminates — see plan.md Part G for the equivalent staleness handling on the newer
+suggestion-recompute path (`refresh_stale_suggestions`, every 20 min, batched and
+rate-limit-aware rather than a fixed timeout).
 
 ## 7. Export
 
@@ -494,6 +684,13 @@ interfaces so the choice is swappable per-deployment:
 | **M8** | `/ai/rewrite` (enhance-long, generate-short with the retry loop, enhance-short) | Call each op directly, confirm the 390-char loop actually holds the cap |
 | **M9** | Export: DOCX via `html-for-docx`, PDF via Playwright | Download and open both from a saved project |
 | **M10** | Hardening: upload size/magic-byte enforcement, Fernet key rotation story, `reap_stale_jobs` cron, structured logging, rate limiting on `/auth/*` | Load tests / manual abuse checks pass |
+| **M11** *(delivered)* | Jarvis: `chatbot_graph.py` + three tools, SSE streaming, persisted `chat_sessions`/`chat_messages`, greeting on first session | `POST /chat/sessions` → greeting persisted; ask a project-data question → SSE stream shows `tool_start`/`tool_end` for `project_search`, answer only states tool-returned facts. Verified live against Gemini, a local Ollama model, and the real GitHub Search API — full design in `plan.md` Parts A–F |
+| **M12** *(delivered)* | Optional CV-style Profile page: `user_profiles` table, photo upload, 5 AI-enhanced bio fields, `build_context_digest()` feeding Jarvis as soft (never verified-fact) context | Fill in a distinctive speciality, ask Jarvis an open-ended recommendation question with no other context → suggestions lean toward it, but Jarvis never states it back as fact. `plan.md` Part E |
+| **M13** *(delivered)* | Conversation management: session starring/search/sort, auto-generated titles, background history compaction (`context_summary`) so long conversations stay within context limits | Cross the compaction threshold mid-conversation → later replies still reference facts from the compacted-away turns; delete/star/search sessions via `/chat/sessions`. `plan.md` Part G |
+| **M14** *(delivered)* | Proactive GitHub repo suggestions: background job computes top technologies per user and surfaces real repos independent of any chat turn, sharing a no-repeat guarantee with `github_search` | Edit a project's technologies with the toggle on → a suggestion appears without opening chat; dismiss it → never resurfaces; ask Jarvis about the same technology → no duplicate suggestion either direction. `plan.md` Part H |
 
 M0–M2 sequential. M3 can run in parallel with M4. M5 must precede M6/M7. M8 is independent
 of M6/M7 (it only needs a provider, not the job queue) and can start once M3 is done.
+M11 needs M3 (a working provider) and M5 (the job queue, for M13/M14's background work) but
+not M6–M10. M12 depends only on M8's rewrite machinery. M13/M14 both extend M11 and were
+built after it, once real usage surfaced the need for them.

@@ -81,7 +81,9 @@ async def update_profile(db: AsyncSession, user: User, updates: dict) -> UserPro
     return profile
 
 
-async def enhance_field(db: AsyncSession, user: User, field: str, target_text: str) -> str:
+async def enhance_field(
+    db: AsyncSession, user: User, field: str, target_text: str, instruction: str | None = None
+) -> str:
     if field not in PROFILE_FIELD_OPS:
         raise ProviderError("INVALID_FIELD", f"'{field}' is not an enhanceable profile field")
 
@@ -105,7 +107,7 @@ async def enhance_field(db: AsyncSession, user: User, field: str, target_text: s
         source_text=target_text,
         char_limit=char_limit,
         context=context,
-        instruction=None,
+        instruction=instruction,
     )
     return draft.strip()
 

@@ -41,12 +41,13 @@ export async function updateProfile(payload: ProfileUpdatePayload): Promise<Prof
 export async function enhanceProfileField(args: {
   field: EnhanceableField;
   target_text: string;
+  instruction?: string;
   signal?: AbortSignal;
 }): Promise<string> {
   const result = await apiFetch<{ text: string }>("profile/enhance", {
     method: "POST",
     signal: args.signal,
-    body: JSON.stringify({ field: args.field, target_text: args.target_text }),
+    body: JSON.stringify({ field: args.field, target_text: args.target_text, instruction: args.instruction }),
   });
   return result.text;
 }

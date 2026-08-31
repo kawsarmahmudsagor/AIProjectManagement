@@ -27,6 +27,27 @@ from langgraph.prebuilt import ToolNode, tools_condition
 from app.models.user import ChatProvider
 from app.providers.base import LLMProvider
 
+_ContentType = str | list
+
+
+def stringify_content(content: _ContentType) -> str:
+    """A chat model's (streamed or final) content is str | list[str | dict] — some
+    providers emit a list of content blocks (text/thinking/redacted_thinking/tool_use/
+    signature_delta/...) instead of a plain string, particularly under extended thinking.
+    Only text blocks are ever meant for the user; thinking/tool-delta blocks must be
+    dropped here rather than passed through, or they show up as literal "[object
+    Object]" garbage once JSON round-trips them to the frontend (dict/list -> JSON array
+    -> JS String() on an array of objects)."""
+    if isinstance(content, str):
+        return content
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, str):
+            parts.append(block)
+        elif isinstance(block, dict) and block.get("type") == "text":
+            parts.append(block.get("text", ""))
+    return "".join(parts)
+
 # Caps agent-node invocations per turn so a model stuck calling tools repeatedly can't
 # loop forever. When hit, the agent node returns a plain (tool-call-free) fallback
 # message instead of forcing a mid-tool-call stop — that would otherwise leave an
@@ -143,7 +164,7 @@ async def stream_chat(
 
         if kind == "on_chat_model_stream":
             chunk = event.get("data", {}).get("chunk")
-            delta = getattr(chunk, "content", None)
+            delta = stringify_content(getattr(chunk, "content", None) or "")
             if delta:
                 yield {"type": "token", "delta": delta}
 

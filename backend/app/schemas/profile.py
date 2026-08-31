@@ -54,6 +54,7 @@ class ProfileUpdate(BaseModel):
 class ProfileEnhanceRequest(BaseModel):
     field: str  # one of ENHANCEABLE_FIELDS
     target_text: str = ""
+    instruction: str | None = None
 
 
 class ProfileEnhanceResponse(BaseModel):

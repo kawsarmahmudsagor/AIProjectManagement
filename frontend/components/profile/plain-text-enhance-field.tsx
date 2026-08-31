@@ -1,13 +1,20 @@
 "use client";
 
 import { Check, RotateCcw, Sparkles, X } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useController, type Control } from "react-hook-form";
 import { Button } from "@/components/ui/button";
 import { useShowProviderErrorModal } from "@/components/layout/provider-error-modal";
+import { AiEnhanceContextDialog } from "@/components/projects/ai/ai-enhance-context-dialog";
 import { ApiError } from "@/lib/api-client";
+import { cn } from "@/lib/utils";
 import { enhanceProfileField, type EnhanceableField } from "@/lib/profile";
 import type { ProfileFormValues } from "@/lib/profile-schema";
+
+/** Same 1.6s post-accept glow pulse as DualEditorField's useAppliedPulse, so the box
+ * flashes the AI gradient ring right after a suggestion is replaced in, not just while
+ * generating. */
+const APPLIED_GLOW_MS = 1600;
 
 /** The lighter equivalent of DualEditorField/AiSuggestionPanel for the Profile page's
  * bio fields — these are plain text (no Tiptap toolbar, unlike project description
@@ -36,14 +43,22 @@ export function PlainTextEnhanceField({
     | { status: "ready"; text: string }
     | { status: "error"; message: string };
   const [suggestion, setSuggestion] = useState<SuggestionState>({ status: "idle" });
+  const [showEnhancePrompt, setShowEnhancePrompt] = useState(false);
   const showProviderError = useShowProviderErrorModal();
+  const lastInstructionRef = useRef<string | undefined>(undefined);
 
-  const run = async () => {
+  const [applied, setApplied] = useState(false);
+  const appliedTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(appliedTimeoutRef.current), []);
+
+  const run = async (instruction?: string) => {
+    lastInstructionRef.current = instruction;
     setSuggestion({ status: "loading" });
     try {
       const text = await enhanceProfileField({
         field: name as EnhanceableField,
         target_text: value,
+        instruction,
       });
       setSuggestion({ status: "ready", text });
     } catch (err) {
@@ -59,24 +74,42 @@ export function PlainTextEnhanceField({
     if (suggestion.status !== "ready") return;
     field.onChange(suggestion.text);
     setSuggestion({ status: "idle" });
+    setApplied(true);
+    clearTimeout(appliedTimeoutRef.current);
+    appliedTimeoutRef.current = setTimeout(() => setApplied(false), APPLIED_GLOW_MS);
   };
+
+  const glowClass =
+    suggestion.status === "loading"
+      ? "ai-glow ai-glow--generating"
+      : applied
+        ? "ai-glow ai-glow--applied"
+        : undefined;
 
   return (
     <div>
       <div className="mb-1 flex items-center justify-between">
         <label className="text-sm font-medium">{label}</label>
-        <Button type="button" variant="ghost" onClick={() => void run()} disabled={suggestion.status === "loading"} className="h-7 px-2 text-xs">
+        <Button
+          type="button"
+          variant="ghost"
+          onClick={() => setShowEnhancePrompt(true)}
+          disabled={suggestion.status === "loading"}
+          className="h-7 px-2 text-xs"
+        >
           <Sparkles size={13} /> Enhance with AI
         </Button>
       </div>
-      <textarea
-        value={value}
-        onChange={(e) => field.onChange(e.target.value)}
-        onBlur={field.onBlur}
-        placeholder={placeholder}
-        rows={3}
-        className="w-full resize-none rounded-lg border border-border bg-background px-3 py-2 text-sm placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-accent/50"
-      />
+      <div className={cn("overflow-hidden rounded-lg border border-border bg-background", glowClass)}>
+        <textarea
+          value={value}
+          onChange={(e) => field.onChange(e.target.value)}
+          onBlur={field.onBlur}
+          placeholder={placeholder}
+          rows={3}
+          className="w-full resize-none border-0 bg-transparent px-3 py-2 text-sm placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-accent/50"
+        />
+      </div>
       <p className="mt-1 text-right text-xs text-muted">
         {value.length}/{limit}
       </p>
@@ -92,7 +125,12 @@ export function PlainTextEnhanceField({
         <div className="mt-2 rounded-lg border border-danger/30 bg-danger/5 px-3 py-2 text-sm">
           <p className="text-danger">{suggestion.message}</p>
           <div className="mt-2 flex gap-2">
-            <Button type="button" variant="secondary" onClick={() => void run()} className="h-7 px-2 text-xs">
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => void run(lastInstructionRef.current)}
+              className="h-7 px-2 text-xs"
+            >
               Try again
             </Button>
             <Button type="button" variant="ghost" onClick={() => setSuggestion({ status: "idle" })} className="h-7 px-2 text-xs">
@@ -118,7 +156,12 @@ export function PlainTextEnhanceField({
             <Button type="button" onClick={accept} disabled={suggestion.text.length > limit} className="h-7 px-2 text-xs">
               <Check size={13} /> Replace
             </Button>
-            <Button type="button" variant="secondary" onClick={() => void run()} className="h-7 px-2 text-xs">
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => void run(lastInstructionRef.current)}
+              className="h-7 px-2 text-xs"
+            >
               <RotateCcw size={13} /> Try again
             </Button>
             <Button type="button" variant="ghost" onClick={() => setSuggestion({ status: "idle" })} className="ml-auto h-7 px-2 text-xs">
@@ -126,6 +169,17 @@ export function PlainTextEnhanceField({
             </Button>
           </div>
         </div>
+      )}
+
+      {showEnhancePrompt && (
+        <AiEnhanceContextDialog
+          actionLabel={`Enhance ${label}`}
+          onCancel={() => setShowEnhancePrompt(false)}
+          onSubmit={(instruction) => {
+            setShowEnhancePrompt(false);
+            void run(instruction);
+          }}
+        />
       )}
     </div>
   );

@@ -87,9 +87,11 @@ src/
 │   │   └── forgot-password/page.tsx      RSC
 │   │
 │   ├── (app)/                                 authenticated group
-│   │   ├── layout.tsx                    RSC  await requireSession() · <AppShell> (sidebar+topbar) · <NavigationBlockerProvider>
+│   │   ├── layout.tsx                    RSC  await requireSession() · <AppShell> (sidebar+topbar,
+│   │   │                                       wraps <ChatWidgetProvider>) · <NavigationBlockerProvider>
 │   │   ├── dashboard/
-│   │   │   ├── page.tsx                  RSC  prefetch projects → <HydrationBoundary> → <ProjectCardGrid/> CC
+│   │   │   ├── page.tsx                  RSC  prefetch projects → <HydrationBoundary> → <ProjectCardGrid/> CC,
+│   │   │   │                                   plus <RecentConversationsCard/> and <SuggestedReposCard/>
 │   │   │   ├── loading.tsx               RSC  card skeletons
 │   │   │   └── error.tsx                 CC
 │   │   ├── projects/
@@ -101,11 +103,17 @@ src/
 │   │   │       ├── edit/page.tsx         RSC  prefetch project → <ProjectForm mode="edit">
 │   │   │       ├── loading.tsx
 │   │   │       └── not-found.tsx         RSC
+│   │   ├── conversations/
+│   │   │   └── page.tsx                  RSC  search/filter/sort a user's Jarvis sessions — see §10
+│   │   ├── profile/
+│   │   │   └── page.tsx                  RSC  CV-style profile form — see §11
 │   │   └── settings/
-│   │       ├── layout.tsx                RSC  settings sub-nav
+│   │       ├── layout.tsx                CC  settings sub-nav (usePathname-driven, not server-rendered —
+│   │       │                                   needed once the Chatbot tab below was added)
 │   │       ├── page.tsx                  RSC  redirect → ./ai-providers
 │   │       ├── ai-providers/page.tsx     RSC  → AgentPersonaSelect CC (business_analyst|technical_developer,
 │   │       │                                    PATCH /auth/me) + AiProviderSettings CC (Ollama + Gemini, Test connection)
+│   │       ├── chatbot/page.tsx          RSC  → provider select + <PreemptiveSuggestionsToggle/> CC — see §10
 │   │       └── account/page.tsx          RSC
 │   │
 │   └── api/                                   BFF — the browser only ever talks to these
@@ -114,7 +122,10 @@ src/
 │       ├── auth/logout/route.ts
 │       ├── auth/refresh/route.ts               single-flight refresh
 │       ├── auth/session/route.ts               GET current user (client bootstrap)
-│       └── bff/[...path]/route.ts               catch-all proxy → FASTAPI_URL, injects Bearer
+│       └── bff/[...path]/route.ts               catch-all proxy → FASTAPI_URL, injects Bearer;
+│                                                  buffers the request body once (arrayBuffer()) before
+│                                                  forwarding, so the refresh-and-retry path can replay
+│                                                  it — a body stream can only be read once
 │
 ├── proxy.ts                              ← Next 16 name. NOT middleware.ts
 │
@@ -124,38 +135,79 @@ src/
 ├── components/
 │   ├── ui/                               shadcn primitives (Base UI): button, input, checkbox, popover,
 │   │                                     calendar, tooltip, badge, dialog, alert-dialog, select,
-│   │                                     dropdown-menu, skeleton, progress, card, form
+│   │                                     dropdown-menu, skeleton, progress, card, form, switch (hand-rolled,
+│   │                                     no Base UI toggle primitive existed — added for the chatbot settings page)
 │   ├── layout/  app-shell.tsx · sidebar.tsx · topbar.tsx · user-menu.tsx
-│   ├── common/  guarded-link.tsx · empty-state.tsx · char-counter.tsx · info-tip.tsx · confirm-dialog.tsx
+│   ├── common/  guarded-link.tsx · empty-state.tsx · char-counter.tsx · info-tip.tsx · confirm-dialog.tsx ·
+│   │            confirm-popover.tsx        inline (not modal) confirm — used by conversation delete, §10
 │   ├── editor/
 │   │   ├── rich-text-editor.tsx          CC  Tiptap instance + toolbar + counter (leaf, memoized)
 │   │   ├── editor-toolbar.tsx            CC  Paragraph select, B/I/U, OL, UL, clear formatting
 │   │   ├── editor-extensions.ts               shared extension factory (limit-aware)
 │   │   └── rich-text-field.tsx           CC  RHF <Controller> adapter around the above
-│   └── projects/
-│       ├── project-search.tsx            CC  "Search projects..." (nuqs-free: useSearchParams + replace)
-│       ├── add-project-card.tsx          CC  the expandable card with the × close
-│       ├── project-form.tsx              CC  RHF root, single <FormProvider>
-│       ├── fields/
-│       │   ├── date-range-fields.tsx     CC  Start/End + "Current Project" checkbox
-│       │   ├── technologies-field.tsx    CC  input + Add → chips
-│       │   ├── project-url-field.tsx     CC
-│       │   └── dual-editor-field.tsx     CC  ★ the reusable long/short pair (used 2×)
-│       ├── ai/
-│       │   ├── upload-dropzone.tsx       CC
-│       │   ├── extraction-progress.tsx   CC  job polling UI
-│       │   ├── ai-suggestion-panel.tsx   CC  accept / replace / insert / discard
-│       │   └── ai-origin-badge.tsx       CC  "AI" chip + Revert
-│       ├── project-card.tsx              RSC (presentational)
-│       └── export-menu.tsx               CC
+│   ├── projects/
+│   │   ├── project-search.tsx            CC  "Search projects..." (nuqs-free: useSearchParams + replace)
+│   │   ├── add-project-card.tsx          CC  the expandable card with the × close
+│   │   ├── project-form.tsx              CC  RHF root, single <FormProvider>
+│   │   ├── fields/
+│   │   │   ├── date-range-fields.tsx     CC  Start/End + "Current Project" checkbox
+│   │   │   ├── technologies-field.tsx    CC  input + Add → chips (also reused by the Profile skills fields, §11)
+│   │   │   ├── project-url-field.tsx     CC
+│   │   │   └── dual-editor-field.tsx     CC  ★ the reusable long/short pair (used 2×)
+│   │   ├── ai/
+│   │   │   ├── upload-dropzone.tsx       CC
+│   │   │   ├── extraction-progress.tsx   CC  job polling UI
+│   │   │   ├── ai-suggestion-panel.tsx   CC  accept / replace / insert / discard — also reused by
+│   │   │   │                                  PlainTextEnhanceField, §11
+│   │   │   └── ai-origin-badge.tsx       CC  "AI" chip + Revert
+│   │   ├── project-card.tsx              RSC (presentational)
+│   │   └── export-menu.tsx               CC
+│   ├── chat/                              Jarvis widget — see §10
+│   │   ├── chat-widget.tsx               CC  owns per-turn state; fetch-or-create session on first open
+│   │   ├── chat-widget-context.tsx            ChatWidgetProvider/useChatWidget() — lifts open/closed
+│   │   │                                       state up to AppShell so other routes (Conversations) can
+│   │   │                                       pop the widget open without prop-drilling
+│   │   ├── chat-trigger-button.tsx       CC  floating round FAB, bottom-right
+│   │   ├── chat-panel.tsx                CC  docked panel; header New-chat action
+│   │   ├── chat-message-list.tsx         CC  scrollable, auto-scroll, groups tool-result cards after
+│   │   │                                       their turn's reply text rather than raw persisted order
+│   │   ├── chat-message-bubble.tsx       CC  Markdown-rendered assistant text + repo-suggestion cards
+│   │   └── chat-composer.tsx             CC  textarea + send/stop
+│   ├── conversations/                     Conversations page — see §10
+│   │   ├── conversation-search.tsx       CC  debounced title search, URL-param driven
+│   │   ├── conversation-filters.tsx      CC  starred-only + sort toggles, URL-param driven
+│   │   ├── conversation-list.tsx         CC  rows; click/Enter resumes into the chat widget
+│   │   ├── star-toggle-button.tsx        CC
+│   │   └── delete-conversation-button.tsx CC  behind ConfirmPopover
+│   ├── dashboard/
+│   │   ├── recent-conversations-card.tsx RSC  shortcut into /conversations
+│   │   └── suggested-repos-card.tsx      CC  proactive GitHub suggestions, dismissable — see §11
+│   ├── profile/                           see §11
+│   │   ├── profile-form.tsx              CC  RHF root, single <FormProvider>, mirrors project-form.tsx
+│   │   ├── general-information-card.tsx  CC  name/designation/team/org + skills chips
+│   │   ├── plain-text-enhance-field.tsx  CC  textarea + char counter + "Enhance with AI" (optional
+│   │   │                                       free-text instruction dialog) + AiSuggestionPanel — the
+│   │   │                                       plain-text sibling of dual-editor-field.tsx
+│   │   ├── skills-field.tsx              CC
+│   │   └── photo-upload.tsx              CC  immediate upload/remove, outside the Save Changes batch
+│   └── settings/
+│       ├── agent-persona-select.tsx      CC  existing — optimistic PATCH auth/me
+│       ├── chatbot-provider-select.tsx   CC  Gemini/Ollama for Jarvis specifically
+│       └── preemptive-suggestions-toggle.tsx CC  Switch, optimistic PATCH auth/me
 │
 ├── features/
 │   ├── projects/  schema.ts · defaults.ts · mappers.ts · queries.ts · use-project-form.ts
 │   ├── ai/        use-extraction-job.ts · use-field-suggestion.ts · origin-store.ts
 │   ├── auth/      session.ts (server-only) · use-session.ts
-│   └── drafts/    use-draft-autosave.ts
-├── lib/  api-client.ts · query-client.ts · rich-text/ · utils.ts · env.ts
-└── hooks/  use-debounced-callback.ts · use-unsaved-changes-guard.ts
+│   ├── drafts/    use-draft-autosave.ts
+│   └── profile/   schema.ts        Zod schema mirroring projectFormSchema's shape — see §11
+├── lib/  api-client.ts · query-client.ts · rich-text/ · utils.ts · env.ts ·
+│         sse.ts (generic SSE frame parser, no chat-specific knowledge) ·
+│         chat.ts (chat types, session/message API calls, streamChatTurn) ·
+│         suggestions.ts (proactive-suggestion API calls) ·
+│         profile.ts (profile API calls)
+└── hooks/  use-debounced-callback.ts · use-unsaved-changes-guard.ts ·
+            use-chat-stream.ts (reducer over SSE content blocks; resets on sessionId change)
 ```
 
 **Server/client split rationale:** every `page.tsx` stays an RSC that (1) enforces session, (2) prefetches with a server `QueryClient` and passes a dehydrated state into `<HydrationBoundary>`, (3) renders one client island. Zero interactive logic in RSCs. `app/(app)/layout.tsx` calls `requireSession()` — real authorization lives here and in the BFF route handlers, **not** in `proxy.ts`.
@@ -596,8 +648,112 @@ Restore is **opt-in, never automatic**: a banner offers "Restore" / "Discard". D
 | **M9** | `/settings/ai-providers`: Ollama + Gemini, masked key inputs, Test connection | Save a provider, Test connection reports OK/failure |
 | **M10** | Export: PDF / DOCX via the BFF | Download a real PDF and DOCX |
 | **M11** | Hardening: skeletons, error boundaries, empty states, a11y audit, Playwright E2E, Lighthouse | Full happy path + failure paths green in CI |
+| **M12** *(delivered)* | Jarvis chat widget: floating trigger, SSE-streamed panel, tool-status rows, repo-suggestion cards, Settings > Chatbot (provider + preemptive toggle) — see §10 | Open the chat icon on any authenticated page, ask a question, watch tokens/tool status stream live; toggle preemptive suggestions and confirm the behavior change described in the backend design |
+| **M13** *(delivered)* | Optional CV-style Profile page: photo, name/designation/skills, 5 AI-enhanced bio fields via `PlainTextEnhanceField` — see §11 | Fill in a bio field, Enhance with AI → suggestion panel, never a silent overwrite; Save Changes persists it; reload confirms |
+| **M14** *(delivered)* | Conversations page: search/star/sort/delete/resume, wired to the chat widget via `ChatWidgetProvider` — see §10 | Resume a non-current conversation from `/conversations` → the floating widget opens on it, not whatever was last active |
+| **M15** *(delivered)* | Dashboard "Suggested for you" card: proactive GitHub suggestions, dismissable, independent of any chat turn — see §11 | Add a project with a new technology (toggle on) → a suggestion appears on the Dashboard without opening chat; dismiss → never reappears |
 
 M0–M2 sequential. M3 independent, parallel with M1/M2. M6–M8 strictly ordered; M4 precedes M6.
+M12 needs M2 (real data) and a working chat SSE endpoint from the backend; it does not
+depend on M6–M8. M13 reuses M8's suggestion-panel pattern directly. M14 extends M12. M15 is
+independent frontend-wise (a read of one new endpoint) but needs the backend job/cron
+infrastructure documented in `backend/DESIGN.md` §6 to have anything to display.
+
+## 10. Jarvis chat widget + Conversations page
+
+### 10.1 Mount point and shared state
+
+`components/chat/chat-widget.tsx` mounts as a sibling inside `AppShell`
+(`components/layout/app-shell.tsx`), which wraps every authenticated route in a
+`ChatWidgetProvider` (`components/chat/chat-widget-context.tsx`) — a small context exposing
+`isOpen`/`open()`/`close()`/`toggle()`. Lifting this state out of `ChatWidget` itself is
+what lets the Conversations page (§10.3) pop the widget open on a specific session without
+prop-drilling through the layout. `AppShell` stays mounted across client-side navigation, so
+the widget's local state survives page-to-page nav for free.
+
+### 10.2 Session + streaming flow
+
+On the first panel open: `GET /chat/sessions` → if empty, `POST /chat/sessions` (backend
+auto-inserts the greeting); then `GET /chat/sessions/{id}/messages` renders history.
+Subsequent opens skip session creation and just show existing history — no repeated
+greeting. `lib/sse.ts` is a generic `parseSseStream()` with no chat-specific knowledge;
+`lib/chat.ts`'s `streamChatTurn()` posts to `/chat/sessions/{id}/messages` via `fetch` (not
+`EventSource` — needs a POST body + CSRF header), consuming frames into a typed
+`ChatStreamEvent` union matching the backend's canonical event names (`session_meta`,
+`token`, `tool_start`, `tool_end`, `done`, `error`).
+
+`hooks/use-chat-stream.ts` is a reducer accumulating **content blocks** (text runs +
+`repo_suggestions` blocks), not a single string, so tool results interleave with text
+without special-casing; it aborts the in-flight stream and resets draft state whenever
+`sessionId` changes — the case introduced by resuming a *different* session from the
+Conversations page while the widget was already open. `chat-message-list.tsx` groups
+messages by turn and renders a turn's tool-result cards after its reply text, regardless
+of raw persisted order, so a repo-suggestion card never appears to "precede" the sentence
+that introduced it. `chat-message-bubble.tsx` renders assistant text as Markdown
+(`react-markdown` + `remark-gfm`).
+
+Closing the panel mid-stream does **not** abort the request — the turn keeps
+streaming/persisting in the background; reopening just re-renders current state.
+
+### 10.3 Conversations page
+
+`app/(app)/conversations/page.tsx` lists every session (search by title, starred-only
+filter, sort, all URL-param driven — the same `useSearchParams`/`replace` convention as
+`project-search.tsx`), backed by `components/conversations/`: `conversation-search.tsx`,
+`conversation-filters.tsx`, `conversation-list.tsx`, `star-toggle-button.tsx`,
+`delete-conversation-button.tsx` (behind the existing `ConfirmPopover`, not a full modal —
+same destructive-action pattern used elsewhere). Clicking a row calls `activateChatSession`,
+invalidates the `["chat","session"]` query, then calls `open()` from `useChatWidget()` — the
+floating widget pops open already on that resumed session. `dashboard/page.tsx` links into
+this page via `RecentConversationsCard`, a small list of the 5 most recent sessions.
+
+### 10.4 Settings > Chatbot
+
+Follows `agent-persona-select.tsx`'s exact optimistic-PATCH-with-rollback shape, PATCHing
+`auth/me`: `chatbot-provider-select.tsx` (Gemini/Ollama for Jarvis specifically) +
+`preemptive-suggestions-toggle.tsx` (a hand-rolled `components/ui/switch.tsx` — no toggle
+primitive existed in the shadcn set before this). `settings/layout.tsx` had to become a
+client component using `usePathname()` to add this tab correctly (it was a server component
+with one hardcoded active-tab link before).
+
+## 11. Profile page + proactive suggestions
+
+### 11.1 Profile form
+
+`app/(app)/profile/page.tsx` (RSC, `serverApiFetch("profile")` + `serverApiFetch("auth/me")`,
+try/catch fallback to empty) renders `ProfileForm` (CC, RHF root) — follows
+**`ProjectForm`'s** convention (one submit action) rather than the instant-PATCH-per-field
+settings pattern, since this is a real multi-field form with one Save action:
+
+```
+ProfileForm (CC, RHF root)
+├── GeneralInformationCard
+│   ├── PhotoUpload           immediate upload/remove — not part of the Save Changes batch
+│   ├── First/Middle/Last/Preferred Name (only First required)
+│   ├── Designation, Team, Organization, Speciality (plain text inputs)
+│   └── PrimarySkillsField / SecondarySkillsField  — reuses TechnologiesField's chip pattern
+├── PlainTextEnhanceField × 5  (Professional Biography [550], Work Experience Summary [390],
+│   Career Objective [390], Key Strengths [390], Responsibilities [390]) — each has an
+│   optional free-text instruction dialog before generating, then the same AiSuggestionPanel
+│   accept/discard step as the project form, plus an "applied" glow pulse after accepting
+│   (matching DualEditorField)
+└── FormFooter — Save Changes (disabled until dirty+valid)
+```
+
+`features/profile/schema.ts` mirrors `projectFormSchema`'s shape (per-field `.max()` caps,
+only `first_name` required).
+
+### 11.2 Dashboard "Suggested for you"
+
+`components/dashboard/suggested-repos-card.tsx` — a client component (unlike the
+server-rendered `RecentConversationsCard`, it needs the dismiss interaction), rendered next
+to `RecentConversationsCard` on the Dashboard. Fetched server-side once per page load
+(`GET /suggestions/github`) and passed in as `initialSuggestions`; dismissing a suggestion
+(`POST /suggestions/github/{id}/dismiss` via `lib/suggestions.ts`) removes it from the list
+optimistically. This card is populated by a backend job that runs independent of any chat
+turn — see `backend/DESIGN.md` §6 and `plan.md` Part H for the full mechanism (technology
+frequency → cached GitHub lookup → per-user no-repeat log shared with Jarvis's own
+`github_search` tool).
 
 ## Risk register (ranked)
 

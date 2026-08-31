@@ -1,0 +1,41 @@
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.database import get_db
+from app.core.deps import CurrentUser
+from app.models.repo_suggestion import RepoSuggestion
+from app.models.user import User
+from app.schemas.suggestion import RepoOut, RepoSuggestionOut
+from app.services import suggestion_service
+
+router = APIRouter(prefix="/suggestions", tags=["suggestions"])
+
+
+def _to_out(s: RepoSuggestion) -> RepoSuggestionOut:
+    return RepoSuggestionOut(
+        id=s.id,
+        technology=s.technology_display,
+        repo=RepoOut(**s.repo),
+        computed_at=s.computed_at,
+        dismissed=s.dismissed,
+    )
+
+
+@router.get("/github", response_model=list[RepoSuggestionOut])
+async def list_github_suggestions(
+    user: User = CurrentUser, db: AsyncSession = Depends(get_db)
+) -> list[RepoSuggestionOut]:
+    suggestions = await suggestion_service.list_active_suggestions(db, user.id)
+    return [_to_out(s) for s in suggestions]
+
+
+@router.post("/github/{suggestion_id}/dismiss", response_model=RepoSuggestionOut)
+async def dismiss_github_suggestion(
+    suggestion_id: UUID, user: User = CurrentUser, db: AsyncSession = Depends(get_db)
+) -> RepoSuggestionOut:
+    suggestion = await suggestion_service.dismiss_suggestion(db, user.id, suggestion_id)
+    if suggestion is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Suggestion not found")
+    return _to_out(suggestion)

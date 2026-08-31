@@ -13,10 +13,20 @@ from uuid import UUID
 
 from saq import CronJob, Queue
 
+from app import models  # noqa: F401  # registers every ORM model so cross-model
+# relationship() string references (e.g. User.chat_sessions -> "ChatSession") resolve —
+# this worker process never imports app.main/routers, which is what pulls all model
+# modules in transitively on the FastAPI side.
 from app.core.config import get_settings
 from app.workers import bridge
 from app.workers.stale_jobs import reap_stale_jobs
-from app.workers.tasks import run_extraction_job
+from app.workers.suggestion_refresh import refresh_stale_suggestions
+from app.workers.tasks import (
+    compact_history,
+    generate_session_title,
+    recompute_user_suggestions,
+    run_extraction_job,
+)
 
 if sys.platform == "win32":
     # Only matters for the standalone `saq app.workers.settings.settings` worker CLI,
@@ -58,6 +68,35 @@ async def enqueue_extraction(job_id: UUID) -> None:
     )
 
 
+async def enqueue_generate_title(session_id: UUID) -> None:
+    # No `key=` (unlike enqueue_extraction) — nothing needs to look this job up later,
+    # and generate_session_title's own "still 'New chat'?" guard makes a duplicate
+    # enqueue harmless, so no dedup key is worth the complexity.
+    await bridge.run_async(
+        queue.enqueue("generate_session_title", session_id=str(session_id), timeout=60)
+    )
+
+
+async def enqueue_compact_history(session_id: UUID) -> None:
+    await bridge.run_async(queue.enqueue("compact_history", session_id=str(session_id), timeout=120))
+
+
+async def enqueue_suggestion_recompute(user_id: UUID) -> None:
+    # key=f"user-suggestions:{user_id}" collapses rapid successive project edits for the
+    # same user into one queued job (SAQ skips enqueuing a duplicate while a job with this
+    # key is already queued/active) — recompute_user_suggestions' own debounce check in
+    # suggestion_service.py additionally covers the case where a prior job already ran and
+    # completed recently.
+    await bridge.run_async(
+        queue.enqueue(
+            "recompute_user_suggestions",
+            user_id=str(user_id),
+            key=f"user-suggestions:{user_id}",
+            timeout=60,
+        )
+    )
+
+
 async def request_cancel(job_id: UUID) -> None:
     """Best-effort: tells the SAQ worker to abort the in-flight task for this job.
     Safe to call even if the job already finished or was never picked up — queue.abort
@@ -75,7 +114,19 @@ async def request_cancel(job_id: UUID) -> None:
 
 settings = {
     "queue": queue,
-    "functions": [run_extraction_job],
+    "functions": [
+        run_extraction_job,
+        generate_session_title,
+        compact_history,
+        recompute_user_suggestions,
+    ],
     "concurrency": _settings.saq_concurrency,
-    "cron_jobs": [CronJob(reap_stale_jobs, cron="*/5 * * * *")],
+    "cron_jobs": [
+        CronJob(reap_stale_jobs, cron="*/5 * * * *"),
+        # Every 20 min, not 5 — unlike reap_stale_jobs (a pure DB sweep), this makes real
+        # outbound GitHub calls (batched/paced in suggestion_service.py); a tighter
+        # interval would eat into the shared rate-limit budget for no user-visible
+        # benefit, since suggestions are also individually TTL'd.
+        CronJob(refresh_stale_suggestions, cron="*/20 * * * *"),
+    ],
 }

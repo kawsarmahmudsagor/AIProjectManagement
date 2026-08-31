@@ -41,6 +41,15 @@ class Settings(BaseSettings):
     github_min_stars: int = 200
     github_freshness_months: int = 12
 
+    # Proactive suggestions background feature (app/services/suggestion_service.py).
+    github_suggestion_cache_ttl_hours: int = 12
+    github_suggestions_ttl_hours: int = 24
+    github_suggestions_debounce_hours: int = 6
+    github_suggestions_top_technologies: int = 5
+    github_suggestions_repos_per_technology: int = 3
+    github_suggestions_cron_batch_size: int = 10
+    github_suggestions_min_call_interval_seconds: float = 2.5
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

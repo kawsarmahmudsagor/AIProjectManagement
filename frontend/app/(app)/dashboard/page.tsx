@@ -1,7 +1,11 @@
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
+import { RecentConversationsCard } from "@/components/dashboard/recent-conversations-card";
+import { SuggestedReposCard } from "@/components/dashboard/suggested-repos-card";
 import { ProjectCard } from "@/components/projects/project-card";
+import type { ChatSessionListResponse } from "@/lib/chat";
 import { serverApiFetch } from "@/lib/server-api";
+import type { GithubSuggestion } from "@/lib/suggestions";
 import type { ProjectListResponse } from "@/lib/types";
 
 export default async function DashboardPage() {
@@ -11,6 +15,20 @@ export default async function DashboardPage() {
     data = await serverApiFetch<ProjectListResponse>("projects?page=1&page_size=12");
   } catch {
     loadError = "Couldn't reach the API — is the backend running?";
+  }
+
+  let chatData: ChatSessionListResponse = { items: [], total: 0 };
+  try {
+    chatData = await serverApiFetch<ChatSessionListResponse>("chat/sessions?page=1&page_size=5&sort=desc");
+  } catch {
+    // The Conversations card just renders empty — chat being down shouldn't fail the dashboard.
+  }
+
+  let suggestions: GithubSuggestion[] = [];
+  try {
+    suggestions = await serverApiFetch<GithubSuggestion[]>("suggestions/github");
+  } catch {
+    // Same reasoning as the Conversations card — the Suggested for you card just renders empty.
   }
 
   return (
@@ -26,6 +44,11 @@ export default async function DashboardPage() {
       </div>
 
       {loadError && <p className="text-sm text-danger">{loadError}</p>}
+
+      <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <RecentConversationsCard sessions={chatData.items} />
+        <SuggestedReposCard initialSuggestions={suggestions} />
+      </div>
 
       {!loadError && data.items.length === 0 && (
         <p className="text-sm text-muted">

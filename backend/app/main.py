@@ -5,7 +5,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from playwright.async_api import async_playwright
 
 from app.core.config import get_settings
-from app.routers import ai, ai_settings, auth, chat, documents, export, jobs, profile, projects
+from app.routers import (
+    ai,
+    ai_settings,
+    auth,
+    chat,
+    documents,
+    export,
+    jobs,
+    profile,
+    projects,
+    suggestions,
+)
 from app.workers import bridge, worker_process
 from app.workers.settings import queue as extraction_queue
 
@@ -64,6 +75,7 @@ app.include_router(ai_settings.router, prefix="/api/v1")
 app.include_router(export.router, prefix="/api/v1")
 app.include_router(chat.router, prefix="/api/v1")
 app.include_router(profile.router, prefix="/api/v1")
+app.include_router(suggestions.router, prefix="/api/v1")
 
 
 @app.get("/healthz", tags=["meta"])

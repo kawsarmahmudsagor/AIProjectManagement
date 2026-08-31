@@ -1,6 +1,6 @@
 "use client";
 
-import { X } from "lucide-react";
+import { SquarePen, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { ChatComposer } from "@/components/chat/chat-composer";
 import { ChatMessageList } from "@/components/chat/chat-message-list";
@@ -16,12 +16,16 @@ export function ChatPanel({
   draft,
   onSend,
   onClose,
+  onNewChat,
+  isStartingNew,
   loading,
 }: {
   messages: ChatMessage[];
   draft: ChatDraft;
   onSend: (content: string) => void;
   onClose: () => void;
+  onNewChat: () => void;
+  isStartingNew: boolean;
   loading: boolean;
 }) {
   const [visible, setVisible] = useState(false);
@@ -37,7 +41,7 @@ export function ChatPanel({
       aria-modal="false"
       aria-label="Jarvis chat"
       className={cn(
-        "absolute bottom-full right-0 z-30 mb-3 flex h-[560px] w-[380px] origin-bottom-right flex-col overflow-hidden rounded-xl border border-border bg-surface shadow-2xl transition duration-150 ease-out motion-reduce:transition-none",
+        "absolute bottom-full right-0 z-30 mb-3 flex h-[640px] w-[520px] origin-bottom-right flex-col overflow-hidden rounded-xl border border-border bg-surface shadow-2xl transition duration-150 ease-out motion-reduce:transition-none",
         visible ? "scale-100 opacity-100" : "pointer-events-none scale-95 opacity-0",
       )}
     >
@@ -47,14 +51,26 @@ export function ChatPanel({
       />
       <div className="flex items-center justify-between border-b border-border px-3 py-2.5">
         <span className="text-sm font-semibold">Jarvis</span>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="Close chat"
-          className="rounded-lg p-1 text-muted hover:bg-surface-2 hover:text-foreground"
-        >
-          <X size={16} />
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={onNewChat}
+            disabled={isStartingNew || loading}
+            aria-label="New conversation"
+            title="New conversation"
+            className="rounded-lg p-1 text-muted hover:bg-surface-2 hover:text-foreground disabled:opacity-50"
+          >
+            <SquarePen size={16} />
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close chat"
+            className="rounded-lg p-1 text-muted hover:bg-surface-2 hover:text-foreground"
+          >
+            <X size={16} />
+          </button>
+        </div>
       </div>
 
       {loading ? (

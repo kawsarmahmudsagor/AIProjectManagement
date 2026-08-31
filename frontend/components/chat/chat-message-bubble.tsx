@@ -1,6 +1,9 @@
 import { Sparkles } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { RepoSuggestionCard } from "@/components/chat/repo-suggestion-card";
 import type { ChatMessage, RepoSuggestion } from "@/lib/chat";
+import { cn } from "@/lib/utils";
 
 function UserBubble({ content }: { content: string }) {
   return (
@@ -12,11 +15,18 @@ function UserBubble({ content }: { content: string }) {
 
 function AssistantBubble({ content }: { content: string }) {
   return (
-    <div className="mr-auto max-w-[85%] rounded-lg rounded-tl-sm border border-border bg-surface px-3 py-2 text-sm">
-      {content}
+    <div className="mr-auto max-w-[85%] rounded-lg rounded-tl-sm border border-border bg-surface px-3 py-2">
+      <div className="prose prose-invert prose-sm max-w-none">
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+      </div>
     </div>
   );
 }
+
+// Roughly the height of 3 RepoSuggestionCards (each ~92px with a 2-line description
+// and language tag, plus the 8px gap between them) — beyond that the list scrolls
+// inside the card instead of growing it indefinitely.
+const VISIBLE_REPO_COUNT = 3;
 
 /** Visually distinct bordered/tinted container — same treatment as AiSuggestionPanel's
  * "ready" state — so GitHub suggestions read as AI-proposed content, not inline prose. */
@@ -26,11 +36,22 @@ function RepoSuggestionsBlock({ repos }: { repos: RepoSuggestion[] }) {
       <p className="flex items-center gap-1.5 px-1 text-xs font-medium text-accent">
         <Sparkles size={12} /> Suggested repositories
       </p>
-      {repos.map((repo) => (
-        <RepoSuggestionCard key={repo.full_name} repo={repo} />
-      ))}
+      <div
+        className={cn(
+          "space-y-2",
+          repos.length > VISIBLE_REPO_COUNT && "max-h-[300px] overflow-y-auto pr-1",
+        )}
+      >
+        {repos.map((repo) => (
+          <RepoSuggestionCard key={repo.full_name} repo={repo} />
+        ))}
+      </div>
     </div>
   );
+}
+
+function extractRepos(message: ChatMessage): RepoSuggestion[] {
+  return (message.tool_result as { repos?: RepoSuggestion[] } | null)?.repos ?? [];
 }
 
 /** One persisted ChatMessage row. Callers should already have filtered out rows this
@@ -42,8 +63,7 @@ export function ChatMessageBubble({ message }: { message: ChatMessage }) {
 
   // role === "tool" — only github_search results with at least one repo are ever shown;
   // project_search/portfolio_analysis results are data for the LLM, not user-facing.
-  const repos = (message.tool_result as { repos?: RepoSuggestion[] } | null)?.repos ?? [];
-  return <RepoSuggestionsBlock repos={repos} />;
+  return <RepoSuggestionsBlock repos={extractRepos(message)} />;
 }
 
 /** Whether a persisted row has anything to render at all — an assistant row that only
@@ -53,6 +73,13 @@ export function ChatMessageBubble({ message }: { message: ChatMessage }) {
 export function isRenderable(message: ChatMessage): boolean {
   if (message.role === "user") return true;
   if (message.role === "assistant") return message.content.trim().length > 0;
-  const repos = (message.tool_result as { repos?: RepoSuggestion[] } | null)?.repos;
-  return Boolean(repos && repos.length > 0);
+  return extractRepos(message).length > 0;
+}
+
+/** Whether this row is a github_search repo-suggestion card — chat-message-list.tsx
+ * uses this to render such cards after the turn's reply text instead of before it (the
+ * persisted row order reflects when the tool ran, which is before the model's final
+ * reply references it). */
+export function hasRepoSuggestions(message: ChatMessage): boolean {
+  return message.role === "tool" && extractRepos(message).length > 0;
 }
