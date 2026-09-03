@@ -8,17 +8,8 @@ import { StarToggleButton } from "@/components/conversations/star-toggle-button"
 import { Card } from "@/components/ui/card";
 import { ApiError } from "@/lib/api-client";
 import { activateChatSession, type ChatSession } from "@/lib/chat";
+import { formatTimestamp } from "@/lib/dates";
 import { cn } from "@/lib/utils";
-
-function formatTimestamp(iso: string) {
-  return new Date(iso).toLocaleString("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
-}
 
 export function ConversationList({ sessions }: { sessions: ChatSession[] }) {
   const queryClient = useQueryClient();

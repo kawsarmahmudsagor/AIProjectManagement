@@ -11,7 +11,7 @@ from app.models.base import Timestamps, UUIDPk
 
 class ProviderName(StrEnum):
     GEMINI = "gemini"
-    OLLAMA = "ollama"
+    OPENAI = "openai"
 
 
 # Shared SQLAlchemy Enum instance — reused by extraction_job.py so the "provider_name"
@@ -22,8 +22,8 @@ provider_name_enum = Enum(ProviderName, name="provider_name")
 
 class AIProviderSetting(Base, UUIDPk, Timestamps):
     """Per-user provider config. encrypted_api_key is Fernet-ciphertext (app.core.security)
-    — required for gemini, optional for ollama (only needed if base_url points at Ollama
-    Cloud for non-extraction chat use; extraction itself is local-only, see DESIGN.md §4).
+    — required for both gemini and openai. base_url is unused by either provider today;
+    it's kept nullable rather than dropped since it costs nothing to leave in place.
     """
 
     __tablename__ = "ai_provider_settings"

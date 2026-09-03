@@ -34,7 +34,7 @@ export type Project = {
 
 export type ProviderSetting = {
   id: string;
-  provider: "gemini" | "ollama";
+  provider: "gemini" | "openai";
   api_key_masked: string | null;
   base_url: string | null;
   default_model: string | null;
@@ -43,10 +43,10 @@ export type ProviderSetting = {
 
 export type ProviderModelCatalog = { models: string[]; default: string };
 
-export type ProviderModelCatalogResponse = Record<"gemini" | "ollama", ProviderModelCatalog>;
+export type ProviderModelCatalogResponse = Record<"gemini" | "openai", ProviderModelCatalog>;
 
 export type AgentPersona = "business_analyst" | "technical_developer";
-export type ChatProvider = "gemini" | "ollama";
+export type ChatProvider = "gemini" | "openai";
 
 export type UserOut = {
   id: string;
@@ -60,7 +60,9 @@ export type UserOut = {
   chatbot_preemptive_github_suggestions: boolean;
 };
 
-export type UploadResponse = { document_id: string; job_id: string };
+// job_id is null when purpose="store_only" (the AI work-breakdown upload path) — no
+// ExtractionJob is created in that case, so there's nothing to poll.
+export type UploadResponse = { document_id: string; job_id: string | null };
 
 export type JobStatus =
   | "queued"
@@ -93,4 +95,205 @@ export type ExtractionJobStatus = {
   status: JobStatus;
   result: ExtractionResult | null;
   error: ErrorDetail | null;
+};
+
+// Mirrors backend/app/schemas/task.py and backend/app/models/task.py.
+export type TaskStatus = "todo" | "in_progress" | "blocked" | "done";
+export type TaskPriority = "low" | "medium" | "high" | "urgent";
+export type TaskSource = "manual" | "ai";
+
+export type Task = {
+  id: string;
+  project_id: string;
+  parent_id: string | null;
+  title: string;
+  description: string;
+  status: TaskStatus;
+  priority: TaskPriority;
+  source: TaskSource;
+  estimate_minutes: number | null;
+  due_date: string | null;
+  position: number;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+  subtask_total: number;
+  subtask_done: number;
+};
+
+// The list-row projection — no `description`, matching ProjectSummary's convention.
+export type TaskSummary = Omit<Task, "description" | "created_at" | "updated_at">;
+
+export type TaskListResponse = { items: TaskSummary[]; total: number };
+
+export type TaskCreatePayload = {
+  title: string;
+  description?: string;
+  status?: TaskStatus;
+  priority?: TaskPriority;
+  estimate_minutes?: number | null;
+  due_date?: string | null;
+  parent_id?: string | null;
+};
+
+export type TaskUpdatePayload = Partial<TaskCreatePayload>;
+
+export type TaskListFilters = {
+  q?: string;
+  status?: TaskStatus[];
+  priority?: TaskPriority[];
+  include_subtasks?: boolean;
+  sort?: "board" | "position" | "due_date" | "priority" | "created_at" | "updated_at";
+  order?: "asc" | "desc";
+};
+
+// Mirrors backend/app/schemas/breakdown.py — the AI work-breakdown flagship feature.
+export type EstimateSize = "xs" | "s" | "m" | "l" | "xl";
+
+export type ProposedTask = {
+  ref: string;
+  title: string;
+  description: string;
+  grounded: boolean;
+  phase: string | null;
+  parent_ref: string | null;
+  priority: TaskPriority;
+  estimate_size: EstimateSize | null;
+  source_quote: string | null;
+};
+
+export type BreakdownResult = { tasks: ProposedTask[]; confidence_notes: string[] };
+
+export type BreakdownJob = {
+  id: string;
+  status: JobStatus;
+  document_id: string | null;
+  prompt: string | null;
+  max_tasks: number;
+  is_scanned: boolean;
+  result: BreakdownResult | null;
+  // ref -> id of the Task actually created for it (empty until something is accepted).
+  accepted: Record<string, string>;
+  dismissed_refs: string[];
+  error_code: string | null;
+  error_message: string | null;
+};
+
+export type BreakdownCreatePayload = {
+  document_id?: string | null;
+  prompt?: string | null;
+  provider?: "gemini" | "openai";
+  max_tasks?: number;
+};
+
+export type BreakdownAcceptItem = {
+  ref: string;
+  title: string;
+  description?: string;
+  priority?: TaskPriority;
+  estimate_minutes?: number | null;
+  estimate_size?: EstimateSize | null;
+  phase?: string | null;
+  parent_ref?: string | null;
+};
+
+export type BreakdownSkippedItem = { ref: string; reason: string };
+
+export type BreakdownAcceptResponse = {
+  created: Task[];
+  skipped: BreakdownSkippedItem[];
+  promoted_refs: string[];
+};
+
+// Mirrors backend/app/schemas/brag_document.py — the Brag Document Generator feature.
+export type BragDocumentPreviewResponse = {
+  document_id: string;
+  detected_member_name: string | null;
+  match_confidence: number;
+  candidate_member_names: string[];
+  // e.g. "August 2026" — display as-is, pass back to POST /brag-documents as-is.
+  available_months: string[];
+};
+
+export type BragDocumentCreatePayload = {
+  document_id: string;
+  member_name: string;
+  target_month: string;
+  provider?: ChatProvider | null;
+  // Omit to default to "{target_month} Brag Document" (backend/app/models/brag_document_job.py).
+  name?: string | null;
+};
+
+// One row in the saved-documents list shown on the Brag Documents page.
+export type BragDocumentJobSummary = {
+  id: string;
+  name: string;
+  status: JobStatus;
+  member_name: string;
+  target_month: string;
+  created_at: string;
+};
+
+export type BragDocumentJobListResponse = {
+  items: BragDocumentJobSummary[];
+  total: number;
+};
+
+export type BragDocumentBulletGroup = { heading: string; bullets: string[] };
+
+// `subsections` and `bullets` are alternatives, not both-populated — a group with
+// distinct sub-themes uses subsections, a simpler one uses the flat bullets list.
+export type BragDocumentTechnicalContributionGroup = {
+  project_name: string;
+  bullets: string[];
+  subsections: BragDocumentBulletGroup[];
+  key_contribution: string;
+};
+
+export type BragDocumentImpactArea = { category: string; summary: string };
+
+// LLM-facing result — no hour fields anywhere (those live only in HourStats, a separate
+// deterministic column so the LLM's output can never overwrite the arithmetic).
+export type BragDocumentResult = {
+  technical_contributions: BragDocumentTechnicalContributionGroup[];
+  team_support_bullets: string[];
+  learning_bullets: string[];
+  overall_impact: BragDocumentImpactArea[];
+  confidence_notes: string[];
+};
+
+// Mirrors MemberMonthlySummary 1:1 — every field here is deterministic Python arithmetic,
+// never LLM-authored.
+export type HourStats = {
+  member_name: string;
+  month_name: string;
+  year: number;
+  included_weeks: string[];
+  total_hours: number;
+  expected_target_hours: number;
+  gross_base_hours: number;
+  holiday_deducted_hours: number;
+  holiday_count: number;
+  holiday_names: string[];
+  leave_count: number;
+  leave_hours: number;
+  leave_dates: string[];
+  blocker_count: number;
+  billable_hours: number;
+  non_billable_hours: number;
+  balance_hours: number;
+  target_completion_pct: number;
+};
+
+export type BragDocumentJob = {
+  id: string;
+  name: string;
+  status: JobStatus;
+  document_id: string;
+  member_name: string;
+  target_month: string;
+  result: BragDocumentResult | null;
+  hour_stats: HourStats | null;
+  error_code: string | null;
+  error_message: string | null;
 };

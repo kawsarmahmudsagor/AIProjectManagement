@@ -20,10 +20,19 @@ export type GithubSuggestion = {
   repo: SuggestedRepo;
   computed_at: string;
   dismissed: boolean;
+  source: "dashboard" | "chat";
 };
 
+/** GET /suggestions/github?scope=recent (default) — active suggestions from within the
+ * last day or so, what the Dashboard card shows. */
 export async function listGithubSuggestions(): Promise<GithubSuggestion[]> {
   return apiFetch<GithubSuggestion[]>("suggestions/github");
+}
+
+/** GET /suggestions/github?scope=all — the complete history, dismissed or not, most
+ * recent first; feeds the Conversations page's Suggestions section. */
+export async function listAllGithubSuggestions(): Promise<GithubSuggestion[]> {
+  return apiFetch<GithubSuggestion[]>("suggestions/github?scope=all");
 }
 
 export async function dismissGithubSuggestion(id: string): Promise<GithubSuggestion> {

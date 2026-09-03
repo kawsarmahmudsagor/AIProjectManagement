@@ -15,12 +15,15 @@ GEMINI_MODELS = [
 ]
 GEMINI_DEFAULT_MODEL = "gemini-3.5-flash"
 
-# Local-only gemma4 variants — no `-cloud` tags, so these run full local inference and
-# support structured output for extraction with no fallback substitution needed
-# (see is_ollama_cloud_model / registry.get_provider's purpose="extract" handling,
-# which stays in place as a safety net for anyone configuring a cloud model manually).
-OLLAMA_MODELS = [
-    "gemma4:e2b",
-    "gemma4:e4b",
+OPENAI_MODELS = [
+    "gpt-5.6",
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-4.1",
+    "gpt-4.1-mini",
+    "gpt-4.1-nano",
+    "gpt-4o",
+    "gpt-4o-mini",
 ]
-OLLAMA_DEFAULT_MODEL = "gemma4:e2b"
+OPENAI_DEFAULT_MODEL = "gpt-4.1-mini"

@@ -8,7 +8,7 @@ import { apiFetch, ApiError } from "@/lib/api-client";
 import type { ProviderModelCatalog, ProviderSetting } from "@/lib/types";
 
 type Props = {
-  provider: "gemini" | "ollama";
+  provider: "gemini" | "openai";
   title: string;
   description: string;
   initial?: ProviderSetting;
@@ -17,7 +17,6 @@ type Props = {
 
 export function ProviderCard({ provider, title, description, initial, modelCatalog }: Props) {
   const [apiKey, setApiKey] = useState("");
-  const [baseUrl, setBaseUrl] = useState(initial?.base_url ?? (provider === "ollama" ? "http://localhost:11434" : ""));
   const [defaultModel, setDefaultModel] = useState(initial?.default_model ?? modelCatalog.default);
   // Keep a previously-saved model in the list even if the curated catalog has since
   // moved on, so switching tabs never silently swaps out what's actually saved.
@@ -38,7 +37,6 @@ export function ProviderCard({ provider, title, description, initial, modelCatal
         method: "PUT",
         body: JSON.stringify({
           api_key: apiKey || undefined,
-          base_url: baseUrl || undefined,
           default_model: defaultModel || undefined,
         }),
       });
@@ -56,7 +54,7 @@ export function ProviderCard({ provider, title, description, initial, modelCatal
     try {
       const result = await apiFetch<{ ok: boolean; detail: string }>(`ai-settings/${provider}/test`, {
         method: "POST",
-        body: JSON.stringify({ api_key: apiKey || undefined, base_url: baseUrl || undefined, default_model: defaultModel || undefined }),
+        body: JSON.stringify({ api_key: apiKey || undefined, default_model: defaultModel || undefined }),
       });
       setTestResult(result);
     } catch (err) {
@@ -73,35 +71,15 @@ export function ProviderCard({ provider, title, description, initial, modelCatal
         <p className="text-sm text-muted">{description}</p>
       </div>
 
-      {provider === "gemini" && (
-        <div>
-          <label className="mb-1 block text-sm font-medium">API Key</label>
-          <Input
-            type="password"
-            placeholder={initial?.api_key_masked ?? "Paste your Gemini API key"}
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-          />
-        </div>
-      )}
-
-      {provider === "ollama" && (
-        <>
-          <div>
-            <label className="mb-1 block text-sm font-medium">Base URL</label>
-            <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
-          </div>
-          <div>
-            <label className="mb-1 block text-sm font-medium">API Key (optional)</label>
-            <Input
-              type="password"
-              placeholder={initial?.api_key_masked ?? "Only needed for Ollama Cloud chat"}
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-            />
-          </div>
-        </>
-      )}
+      <div>
+        <label className="mb-1 block text-sm font-medium">API Key</label>
+        <Input
+          type="password"
+          placeholder={initial?.api_key_masked ?? `Paste your ${provider === "gemini" ? "Gemini" : "OpenAI"} API key`}
+          value={apiKey}
+          onChange={(e) => setApiKey(e.target.value)}
+        />
+      </div>
 
       <div>
         <label className="mb-1 block text-sm font-medium">Models</label>

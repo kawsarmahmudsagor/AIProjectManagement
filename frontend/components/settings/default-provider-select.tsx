@@ -5,9 +5,9 @@ import { Card } from "@/components/ui/card";
 import { apiFetch, ApiError } from "@/lib/api-client";
 import type { ProviderSetting } from "@/lib/types";
 
-type Provider = "gemini" | "ollama";
+type Provider = "gemini" | "openai";
 
-const LABELS: Record<Provider, string> = { gemini: "Google Gemini", ollama: "Ollama (local)" };
+const LABELS: Record<Provider, string> = { gemini: "Google Gemini", openai: "OpenAI" };
 
 /** Which provider document extraction and every "Enhance with AI" action use when no
  * per-request override is given — backend/app/providers/registry.py's

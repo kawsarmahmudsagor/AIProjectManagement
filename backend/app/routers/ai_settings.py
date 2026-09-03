@@ -10,11 +10,11 @@ from app.models.user import User
 from app.providers.catalog import (
     GEMINI_DEFAULT_MODEL,
     GEMINI_MODELS,
-    OLLAMA_DEFAULT_MODEL,
-    OLLAMA_MODELS,
+    OPENAI_DEFAULT_MODEL,
+    OPENAI_MODELS,
 )
 from app.providers.gemini import GeminiProvider
-from app.providers.ollama import OllamaProvider
+from app.providers.openai import OpenAIProvider
 from app.schemas.ai_settings import (
     ConnectionTestResult,
     ProviderModelCatalog,
@@ -29,7 +29,7 @@ router = APIRouter(prefix="/ai-settings", tags=["ai-settings"])
 async def list_model_catalog(user: User = CurrentUser) -> dict[ProviderName, ProviderModelCatalog]:
     return {
         ProviderName.GEMINI: ProviderModelCatalog(models=GEMINI_MODELS, default=GEMINI_DEFAULT_MODEL),
-        ProviderName.OLLAMA: ProviderModelCatalog(models=OLLAMA_MODELS, default=OLLAMA_DEFAULT_MODEL),
+        ProviderName.OPENAI: ProviderModelCatalog(models=OPENAI_MODELS, default=OPENAI_DEFAULT_MODEL),
     }
 
 
@@ -116,17 +116,18 @@ async def test_connection(
     api_key = payload.api_key if payload and payload.api_key else (
         decrypt_secret(row.encrypted_api_key) if row and row.encrypted_api_key else None
     )
-    base_url = payload.base_url if payload and payload.base_url else (row.base_url if row else None)
     model = payload.default_model if payload and payload.default_model else (row.default_model if row else None)
 
     if provider == ProviderName.GEMINI:
         if not api_key:
             return ConnectionTestResult(ok=False, detail="Enter an API key first")
         client = GeminiProvider(api_key=api_key, model=model or GEMINI_DEFAULT_MODEL)
+    elif provider == ProviderName.OPENAI:
+        if not api_key:
+            return ConnectionTestResult(ok=False, detail="Enter an API key first")
+        client = OpenAIProvider(api_key=api_key, model=model or OPENAI_DEFAULT_MODEL)
     else:
-        client = OllamaProvider(
-            base_url=base_url or "http://localhost:11434", model=model or OLLAMA_DEFAULT_MODEL, api_key=api_key
-        )
+        return ConnectionTestResult(ok=False, detail=f"Unknown provider: {provider}")
 
     status_result = await client.test_connection()
     return ConnectionTestResult(ok=status_result.ok, detail=status_result.detail, models=status_result.models)

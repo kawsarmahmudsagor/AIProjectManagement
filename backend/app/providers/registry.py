@@ -9,7 +9,7 @@ from app.core.security import decrypt_secret
 from app.models.ai_provider_setting import AIProviderSetting, ProviderName
 from app.providers.base import LLMProvider, ProviderError
 from app.providers.gemini import GeminiProvider
-from app.providers.ollama import OllamaProvider, is_ollama_cloud_model
+from app.providers.openai import OpenAIProvider
 
 _settings = get_settings()
 
@@ -31,19 +31,14 @@ async def get_provider(
     user_id: UUID,
     provider: ProviderName | None = None,
     *,
-    purpose: Literal["extract", "rewrite", "chat"] = "rewrite",
+    purpose: Literal["extract", "rewrite", "chat", "brag_document"] = "rewrite",
 ) -> LLMProvider:
     """Resolve a user's configured provider. Falls back to whichever provider is marked
     `is_default`, then to Gemini, if `provider` isn't given explicitly.
 
-    `purpose` matters only for Ollama: the configured/default model may be a `-cloud`
-    tag (e.g. the Settings page's `gemma4:31b-cloud` default), and Ollama Cloud doesn't
-    support structured output (docs/RESEARCH.md §B3). Rewrite/chat have no such
-    restriction, but `purpose="extract"` swaps in a local fallback model instead of
-    handing the cloud tag to OllamaProvider.extract(), which would just fail.
-    `purpose="chat"` behaves identically to `"rewrite"` here — it exists as its own
-    literal so a future chat-specific model-selection nuance (e.g. a different default
-    model) doesn't require touching every call site."""
+    `purpose` doesn't currently change provider construction for either Gemini or
+    OpenAI — it exists as its own literal so a future purpose-specific nuance (e.g. a
+    different default model for chat) doesn't require touching every call site."""
     query = select(AIProviderSetting).where(AIProviderSetting.user_id == user_id)
     rows = {row.provider: row for row in (await db.execute(query)).scalars().all()}
 
@@ -61,12 +56,12 @@ async def get_provider(
             model=row.default_model or _settings.gemini_default_model,
         )
 
-    if provider == ProviderName.OLLAMA:
-        base_url = (row.base_url if row else None) or _settings.ollama_default_base_url
-        model = (row.default_model if row else None) or _settings.ollama_default_model
-        if purpose == "extract" and is_ollama_cloud_model(model):
-            model = _settings.ollama_extraction_fallback_model
-        api_key = decrypt_secret(row.encrypted_api_key) if row and row.encrypted_api_key else None
-        return OllamaProvider(base_url=base_url, model=model, api_key=api_key)
+    if provider == ProviderName.OPENAI:
+        if row is None or not row.encrypted_api_key:
+            raise ProviderError("PROVIDER_NOT_CONFIGURED", "OpenAI API key is not set — add it in Settings.")
+        return OpenAIProvider(
+            api_key=decrypt_secret(row.encrypted_api_key),
+            model=row.default_model or _settings.openai_default_model,
+        )
 
     raise ProviderError("PROVIDER_UNKNOWN", f"Unknown provider: {provider}")

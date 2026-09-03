@@ -14,6 +14,7 @@ from uuid import UUID
 from saq import CronJob, Queue
 
 from app import models  # noqa: F401  # registers every ORM model so cross-model
+
 # relationship() string references (e.g. User.chat_sessions -> "ChatSession") resolve —
 # this worker process never imports app.main/routers, which is what pulls all model
 # modules in transitively on the FastAPI side.
@@ -25,6 +26,8 @@ from app.workers.tasks import (
     compact_history,
     generate_session_title,
     recompute_user_suggestions,
+    run_brag_document_job,
+    run_breakdown_job,
     run_extraction_job,
 )
 
@@ -65,6 +68,24 @@ async def enqueue_extraction(job_id: UUID) -> None:
     # request_cancel below can look it up without a separate id mapping.
     await bridge.run_async(
         queue.enqueue("run_extraction_job", job_id=str(job_id), key=str(job_id), timeout=600)
+    )
+
+
+async def enqueue_breakdown(job_id: UUID) -> None:
+    # Same reasoning as enqueue_extraction: bridge thread + timeout=600 (matches
+    # stale_jobs._STALE_AFTER) + key=str(job_id) so request_cancel/reap_stale_jobs can
+    # find this SAQ job by the same id as the BreakdownJob row.
+    await bridge.run_async(
+        queue.enqueue("run_breakdown_job", job_id=str(job_id), key=str(job_id), timeout=600)
+    )
+
+
+async def enqueue_brag_document(job_id: UUID) -> None:
+    # Same reasoning as enqueue_extraction/enqueue_breakdown: bridge thread + timeout=600
+    # (matches stale_jobs._STALE_AFTER) + key=str(job_id) so request_cancel/
+    # reap_stale_jobs can find this SAQ job by the same id as the BragDocumentJob row.
+    await bridge.run_async(
+        queue.enqueue("run_brag_document_job", job_id=str(job_id), key=str(job_id), timeout=600)
     )
 
 
@@ -116,6 +137,8 @@ settings = {
     "queue": queue,
     "functions": [
         run_extraction_job,
+        run_breakdown_job,
+        run_brag_document_job,
         generate_session_title,
         compact_history,
         recompute_user_suggestions,

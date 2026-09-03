@@ -1,15 +1,12 @@
-import { Download, FileText, Pencil } from "lucide-react";
+import { Download, FileText, Pencil, ListChecks } from "lucide-react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, Badge } from "@/components/ui/card";
 import { DeleteProjectButton } from "@/components/projects/delete-project-button";
+import { formatLongMonthYear as formatDate } from "@/lib/dates";
 import { serverApiFetch } from "@/lib/server-api";
-import type { Project } from "@/lib/types";
-
-function formatDate(d: string) {
-  return new Date(d).toLocaleDateString("en-US", { month: "long", year: "numeric" });
-}
+import type { Project, TaskListResponse } from "@/lib/types";
 
 export default async function ProjectDetailPage({
   params,
@@ -25,6 +22,21 @@ export default async function ProjectDetailPage({
     notFound();
   }
 
+  // Best-effort — a failed task count must never break the rest of the page, matching
+  // the dashboard's per-section try/catch convention.
+  let taskSummary = "";
+  try {
+    const tasks = await serverApiFetch<TaskListResponse>(
+      `projects/${projectId}/tasks?page_size=1`,
+    );
+    const done = await serverApiFetch<TaskListResponse>(
+      `projects/${projectId}/tasks?status=done&page_size=1`,
+    );
+    if (tasks.total > 0) taskSummary = `${done.total}/${tasks.total} done`;
+  } catch {
+    // silent — the Tasks link still works even if the count doesn't load
+  }
+
   return (
     <div className="mx-auto max-w-3xl">
       <div className="mb-6 flex items-start justify-between">
@@ -36,6 +48,11 @@ export default async function ProjectDetailPage({
           </p>
         </div>
         <div className="flex gap-2">
+          <Link href={`/projects/${project.id}/tasks`}>
+            <Button variant="secondary">
+              <ListChecks size={14} /> Tasks{taskSummary && ` · ${taskSummary}`}
+            </Button>
+          </Link>
           <Link href={`/projects/${project.id}/edit`}>
             <Button variant="secondary">
               <Pencil size={14} /> Edit

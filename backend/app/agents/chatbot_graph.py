@@ -145,7 +145,7 @@ async def stream_chat(
     taxonomy, whereas `astream_events`'s graph-level output shape has changed across
     LangGraph versions. Spot-check this against the installed `langgraph`/`langchain-core`
     versions (see docs/RESEARCH.md §E) before trusting it blindly, same discipline as
-    providers/gemini.py and providers/ollama.py already apply to their own response shapes.
+    providers/gemini.py and providers/openai.py already apply to their own response shapes.
     """
     compiled = _build_graph(tools)
     initial_state: ChatState = {

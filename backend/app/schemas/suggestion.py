@@ -20,3 +20,6 @@ class RepoSuggestionOut(BaseModel):
     repo: RepoOut
     computed_at: datetime
     dismissed: bool
+    # "dashboard" (computed from the user's top technologies) or "chat" (surfaced by
+    # Jarvis's github_search tool during a conversation) — see models/repo_suggestion.py.
+    source: str

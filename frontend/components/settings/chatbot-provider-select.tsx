@@ -5,7 +5,7 @@ import { Card } from "@/components/ui/card";
 import { apiFetch, ApiError } from "@/lib/api-client";
 import type { ChatProvider } from "@/lib/types";
 
-const LABELS: Record<ChatProvider, string> = { gemini: "Google Gemini", ollama: "Ollama (local)" };
+const LABELS: Record<ChatProvider, string> = { gemini: "Google Gemini", openai: "OpenAI" };
 
 /** Which provider drives Jarvis specifically — separate from the "Active provider" used
  * for extraction/rewrite (default-provider-select.tsx). Same optimistic-PATCH-with-

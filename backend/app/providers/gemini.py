@@ -23,12 +23,24 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from app.models.user import AgentPersona
-from app.providers.base import ConnectionStatus, ExtractInput, LLMProvider, ProviderError
+from app.providers.base import (
+    BragDocumentInput,
+    BreakdownInput,
+    ConnectionStatus,
+    ExtractInput,
+    LLMProvider,
+    ProviderError,
+)
 from app.providers.prompts import (
+    BRAG_DOCUMENT_SYSTEM_PROMPTS,
+    BREAKDOWN_SYSTEM_PROMPTS,
     EXTRACTION_SYSTEM_PROMPTS,
     REWRITE_SYSTEM_PROMPTS,
+    build_brag_document_prompt,
+    build_breakdown_prompt,
     build_rewrite_prompt,
 )
+from app.providers.schema_utils import simplify_for_gemini
 
 
 class GeminiProvider(LLMProvider):
@@ -38,7 +50,7 @@ class GeminiProvider(LLMProvider):
 
     def _chat(self, **extra) -> ChatGoogleGenerativeAI:
         # A fresh instance per call — these are cheap wrappers, no persistent connection,
-        # and it keeps this provider stateless like OllamaProvider.
+        # and it keeps this provider stateless like OpenAIProvider.
         return ChatGoogleGenerativeAI(model=self._model_name, google_api_key=self._api_key, **extra)
 
     async def extract(self, doc: ExtractInput, json_schema: dict, *, persona: AgentPersona) -> dict:
@@ -60,7 +72,7 @@ class GeminiProvider(LLMProvider):
 
         chat = self._chat(
             response_mime_type="application/json",
-            response_schema=json_schema,
+            response_schema=simplify_for_gemini(json_schema),
             thinking_level="low",
             max_output_tokens=8192,
         )
@@ -69,7 +81,7 @@ class GeminiProvider(LLMProvider):
             response = await chat.ainvoke(
                 [SystemMessage(content=EXTRACTION_SYSTEM_PROMPTS[persona]), HumanMessage(content=human_content)]
             )
-        except Exception as exc:  # noqa: BLE001 — langchain wraps provider errors inconsistently across versions
+        except Exception as exc:  # langchain wraps provider errors inconsistently across versions
             code, retryable = _classify_error(exc)
             raise ProviderError(code, str(exc), retryable=retryable) from exc
 
@@ -104,13 +116,102 @@ class GeminiProvider(LLMProvider):
             response = await chat.ainvoke(
                 [SystemMessage(content=REWRITE_SYSTEM_PROMPTS[persona]), HumanMessage(content=prompt)]
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # langchain wraps provider errors inconsistently across versions
             code, retryable = _classify_error(exc)
             raise ProviderError(code, str(exc), retryable=retryable) from exc
 
         if not response.text:
             raise ProviderError("EMPTY_RESPONSE", "Gemini returned no content", retryable=True)
         return response.text.strip()
+
+    async def propose_breakdown(
+        self, doc: BreakdownInput, json_schema: dict, *, persona: AgentPersona, max_tasks: int
+    ) -> dict:
+        human_content: list[dict] = []
+        if doc.raw_bytes and doc.mime_type == "application/pdf":
+            human_content.append(
+                {"type": "media", "mime_type": doc.mime_type, "data": base64.b64encode(doc.raw_bytes).decode()}
+            )
+            human_content.append(
+                {"type": "text", "text": build_breakdown_prompt(document_text=None, prompt=doc.prompt, max_tasks=max_tasks)}
+            )
+        else:
+            human_content.append(
+                {
+                    "type": "text",
+                    "text": build_breakdown_prompt(
+                        document_text=doc.extracted_text, prompt=doc.prompt, max_tasks=max_tasks
+                    ),
+                }
+            )
+
+        # 16384, not extract()'s 8192 — a task tree runs larger, and Gemini counts
+        # thinking tokens against max_output_tokens (docs/RESEARCH.md §A3.2), so the
+        # extraction budget is genuinely too tight here.
+        chat = self._chat(
+            response_mime_type="application/json",
+            response_schema=simplify_for_gemini(json_schema),
+            thinking_level="low",
+            max_output_tokens=16384,
+        )
+
+        try:
+            response = await chat.ainvoke(
+                [SystemMessage(content=BREAKDOWN_SYSTEM_PROMPTS[persona]), HumanMessage(content=human_content)]
+            )
+        except Exception as exc:  # langchain wraps provider errors inconsistently across versions
+            code, retryable = _classify_error(exc)
+            raise ProviderError(code, str(exc), retryable=retryable) from exc
+
+        finish_reason = (response.response_metadata or {}).get("finish_reason")
+        if finish_reason == "MAX_TOKENS":
+            raise ProviderError(
+                "TRUNCATED_RESPONSE",
+                "The AI ran out of room before finishing — try again with fewer, larger tasks.",
+                retryable=True,
+            )
+        if not response.text:
+            raise ProviderError("EMPTY_RESPONSE", "Gemini returned no content", retryable=True)
+
+        return json.loads(response.text)
+
+    async def generate_brag_document(
+        self, doc: BragDocumentInput, json_schema: dict, *, persona: AgentPersona
+    ) -> dict:
+        human_content = [{"type": "text", "text": build_brag_document_prompt(doc)}]
+
+        # 16384, not extract()'s 8192 — same reasoning as propose_breakdown: a multi-
+        # section brag document runs larger than 9 flat extraction fields, and Gemini
+        # counts thinking tokens against max_output_tokens.
+        chat = self._chat(
+            response_mime_type="application/json",
+            response_schema=simplify_for_gemini(json_schema),
+            thinking_level="low",
+            max_output_tokens=16384,
+        )
+
+        try:
+            response = await chat.ainvoke(
+                [
+                    SystemMessage(content=BRAG_DOCUMENT_SYSTEM_PROMPTS[persona]),
+                    HumanMessage(content=human_content),
+                ]
+            )
+        except Exception as exc:  # langchain wraps provider errors inconsistently across versions
+            code, retryable = _classify_error(exc)
+            raise ProviderError(code, str(exc), retryable=retryable) from exc
+
+        finish_reason = (response.response_metadata or {}).get("finish_reason")
+        if finish_reason == "MAX_TOKENS":
+            raise ProviderError(
+                "TRUNCATED_RESPONSE",
+                "The AI ran out of room before finishing the brag document — try again.",
+                retryable=True,
+            )
+        if not response.text:
+            raise ProviderError("EMPTY_RESPONSE", "Gemini returned no content", retryable=True)
+
+        return json.loads(response.text)
 
     def get_chat_model(self) -> ChatGoogleGenerativeAI:
         # No response_mime_type/response_schema (those are extract()-only structured-

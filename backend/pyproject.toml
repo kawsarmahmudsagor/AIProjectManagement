@@ -19,10 +19,10 @@ dependencies = [
     "saq[postgres,web]>=0.26.4",
     "psycopg[binary]>=3.2",
     "google-genai>=2.19,<3.0",
-    "ollama==0.6.2",
+    "openai>=1.60",
     "langchain-core>=0.3",
     "langchain-google-genai>=2.1",
-    "langchain-ollama>=0.3",
+    "langchain-openai>=0.3",
     "langgraph>=0.2",
     "pdfplumber>=0.11.10",
     "pypdf>=6.16",
@@ -33,6 +33,7 @@ dependencies = [
     "playwright>=1.62",
     "jinja2>=3.1",
     "bleach>=6.1",
+    "openpyxl>=3.1",
 ]
 
 [project.optional-dependencies]
@@ -56,3 +57,10 @@ target-version = "py311"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# One event loop for the whole session, not one per test function: app/core/database.py's
+# `engine` (and its asyncpg connection pool) is a module-level singleton bound to whichever
+# event loop was running when its first connection was created. A function-scoped loop
+# (pytest-asyncio's default) makes every test after the first fail pool_pre_ping's ping
+# with "Event loop is closed" / a foreign-loop asyncpg error.
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"

@@ -1,7 +1,7 @@
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -70,10 +70,9 @@ async def star_session(
     user: User = CurrentUser,
     db: AsyncSession = Depends(get_db),
 ) -> ChatSessionOut:
-    try:
-        session = await chat_service.set_starred(db, user.id, session_id, payload.starred)
-    except ChatSessionNotFoundError as exc:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Chat session not found") from exc
+    # ChatSessionNotFoundError subclasses ResourceNotFoundError — the app-wide handler in
+    # main.py turns it into a 404, so no try/except is needed here.
+    session = await chat_service.set_starred(db, user.id, session_id, payload.starred)
     return ChatSessionOut.model_validate(session)
 
 
@@ -81,10 +80,7 @@ async def star_session(
 async def activate_session(
     session_id: UUID, user: User = CurrentUser, db: AsyncSession = Depends(get_db)
 ) -> ChatSessionOut:
-    try:
-        session = await chat_service.activate_session(db, user.id, session_id)
-    except ChatSessionNotFoundError as exc:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Chat session not found") from exc
+    session = await chat_service.activate_session(db, user.id, session_id)
     return ChatSessionOut.model_validate(session)
 
 
@@ -92,10 +88,7 @@ async def activate_session(
 async def get_messages(
     session_id: UUID, user: User = CurrentUser, db: AsyncSession = Depends(get_db)
 ) -> list[ChatMessageOut]:
-    try:
-        messages = await chat_service.get_session_messages(db, user.id, session_id)
-    except ChatSessionNotFoundError as exc:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Chat session not found") from exc
+    messages = await chat_service.get_session_messages(db, user.id, session_id)
     return [ChatMessageOut.model_validate(m) for m in messages]
 
 
@@ -103,10 +96,7 @@ async def get_messages(
 async def delete_session(
     session_id: UUID, user: User = CurrentUser, db: AsyncSession = Depends(get_db)
 ) -> None:
-    try:
-        await chat_service.delete_session(db, user.id, session_id)
-    except ChatSessionNotFoundError as exc:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Chat session not found") from exc
+    await chat_service.delete_session(db, user.id, session_id)
 
 
 @router.post("/sessions/{session_id}/messages")

@@ -1,10 +1,12 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.deps import CurrentUser
+from app.core.ownership import require_owned
+from app.models.project import Project
 from app.models.user import User
 from app.schemas.project import ProjectCreate, ProjectListResponse, ProjectOut, ProjectSummary, ProjectUpdate
 from app.services import project_service
@@ -70,18 +72,11 @@ async def create_project(
     return _to_out(project)
 
 
-async def _get_owned_project(project_id: UUID, user: User, db: AsyncSession):
-    project = await project_service.get_project(db, user.id, project_id)
-    if project is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Project not found")
-    return project
-
-
 @router.get("/{project_id}", response_model=ProjectOut)
 async def get_project(
     project_id: UUID, user: User = CurrentUser, db: AsyncSession = Depends(get_db)
 ) -> ProjectOut:
-    project = await _get_owned_project(project_id, user, db)
+    project = await require_owned(db, Project, project_id, user.id, resource="Project")
     return _to_out(project)
 
 
@@ -89,7 +84,7 @@ async def get_project(
 async def update_project(
     project_id: UUID, payload: ProjectUpdate, user: User = CurrentUser, db: AsyncSession = Depends(get_db)
 ) -> ProjectOut:
-    project = await _get_owned_project(project_id, user, db)
+    project = await require_owned(db, Project, project_id, user.id, resource="Project")
     tech_changed = payload.technologies is not None and (
         {t.lower() for t in payload.technologies} != {t.lower() for t in project.technologies}
     )
@@ -103,7 +98,7 @@ async def update_project(
 async def delete_project(
     project_id: UUID, user: User = CurrentUser, db: AsyncSession = Depends(get_db)
 ) -> None:
-    project = await _get_owned_project(project_id, user, db)
+    project = await require_owned(db, Project, project_id, user.id, resource="Project")
     had_technologies = bool(project.technologies)
     await project_service.delete_project(db, project)
     if user.chatbot_preemptive_github_suggestions and had_technologies:

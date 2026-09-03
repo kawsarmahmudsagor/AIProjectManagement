@@ -6,7 +6,7 @@ import type { AgentPersona, ProviderModelCatalogResponse, ProviderSetting, UserO
 
 const FALLBACK_MODELS: ProviderModelCatalogResponse = {
   gemini: { models: ["gemini-3.5-flash"], default: "gemini-3.5-flash" },
-  ollama: { models: ["gemma4:e2b", "gemma4:e4b"], default: "gemma4:e2b" },
+  openai: { models: ["gpt-4.1-mini"], default: "gpt-4.1-mini" },
 };
 
 export default async function AiProvidersPage() {
@@ -41,11 +41,11 @@ export default async function AiProvidersPage() {
         modelCatalog={modelCatalog.gemini}
       />
       <ProviderCard
-        provider="ollama"
-        title="Ollama (local)"
-        description="Runs on your machine — private, but weaker on scanned PDFs, multi-column layouts, and very long documents than Gemini."
-        initial={settings.find((s) => s.provider === "ollama")}
-        modelCatalog={modelCatalog.ollama}
+        provider="openai"
+        title="OpenAI"
+        description="Requires an API key with billing enabled at platform.openai.com. Handles scanned PDFs and multi-column layouts well via document vision."
+        initial={settings.find((s) => s.provider === "openai")}
+        modelCatalog={modelCatalog.openai}
       />
     </div>
   );

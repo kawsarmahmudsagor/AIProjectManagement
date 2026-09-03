@@ -12,7 +12,7 @@ export type User = {
   middle_name: string | null;
   last_name: string | null;
   preferred_name: string | null;
-  chat_provider: "gemini" | "ollama";
+  chat_provider: "gemini" | "openai";
   chatbot_preemptive_github_suggestions: boolean;
 };
 

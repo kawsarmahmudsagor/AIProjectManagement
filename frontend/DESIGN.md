@@ -467,6 +467,82 @@ Panel UI when `ready`:
 - `Replace` = one Tiptap transaction ⇒ Cmd+Z restores the original. Plus a 6-second "Undo" toast.
 - Requests carry an `Idempotency-Key` so a double-click can't spend two LLM calls.
 
+### 4.5 AI work breakdown (as built, M16)
+
+`app/(app)/projects/[projectId]/tasks/breakdown/page.tsx` — an RSC shell (project header
+only) around `<BreakdownClient>`, keyed entirely off the `?job=<id>` search param rather
+than component state, so a refresh mid-review resumes exactly where it left off (the
+`localStorage`-based durability §4.1 uses for extraction jobs would have worked too, but
+the URL is strictly better here — it's also shareable/bookmarkable, and needs no client
+effect to rehydrate).
+
+```
+BreakdownClient          reads ?job=; renders one of:
+├── BreakdownLauncher    "Upload a document" | "Describe the work" (no "reuse an
+│                        already-attached document" option — there's no endpoint to list
+│                        a project's documents yet; deferred, not forgotten)
+├── JobStageStepper      the exact component §4.2's extraction flow uses, shared via
+│                        components/ui/job-stage-stepper.tsx — generalized instead of
+│                        copy-pasted once a second job type needed the identical stepper
+└── BreakdownReview      once status === "succeeded"
+```
+
+**State is a `useReducer`, not RHF or a Zustand store** — a variable-length tree of
+independently-accepted rows where the load-bearing state (`decision: pending | included`)
+isn't a form value at all, and a 40-row `useFieldArray` would re-render the whole array
+per keystroke. Row edits (title/description/priority/hours) live in local `useState`
+inside `BreakdownRow`, committed on blur, so no reducer dispatch fires per keystroke either.
+
+```ts
+// components/breakdown/breakdown-reducer.ts
+type RowDraft = {
+  ref: string; title: string; description: string; priority: TaskPriority;
+  estimate_size: EstimateSize | null; estimate_minutes: number | null;
+  parent_ref: string | null; grounded: boolean; source_quote: string | null;
+  decision: "pending" | "included";
+  rejected: boolean;        // explicit reject, persisted via dismissBreakdownRefs
+  createdTaskId: string | null;  // set once job.accepted has this ref — read-only past this point
+};
+```
+
+A `"sync_job"` action re-derives `createdTaskId`/`rejected` from each poll tick's fresh
+job — the one thing that must never come from local state alone, since a second
+partial-accept or a dismiss changes it server-side. It's a no-op (returns the same object
+reference) when nothing changed, so this doesn't cause an extra render on every 1.2s poll.
+
+**Selection, not a form submit, is the unit of work.** Each row's checkbox toggles
+`decision`; the header shows "N of M selected" and one `Accept N` button — no separate
+per-row accept action. Default decision is `pending`, not `included`: pre-checking every
+row and calling the button "Create" would make one click the user's consent for 40 things
+they didn't individually review, which is exactly what the review step exists to prevent.
+
+**Promotion, not silent auto-include or a hard block.** `promotionCandidates()` computes
+which `included` rows have a parent that is neither included nor already an accepted task;
+these render as a warning strip ("3 subtasks will be added as top-level tasks…") with an
+`Include their parents instead` button, rather than either quietly attaching them anyway
+or refusing to submit. `accept_breakdown_items` on the backend applies the identical rule
+as a safety net (backend/DESIGN.md §6) — the frontend's check is what makes it visible
+*before* the request, not the only thing preventing it.
+
+**Never optimistic, never hand-inserted into the task list cache.** `useAcceptBreakdownItems`
+invalidates `taskKeys.project(projectId)` and the breakdown-job query on success; accepted
+rows get their real `position`/`id` from a refetch, never guessed client-side (backend
+DESIGN.md §3's note on why accept isn't "40 requests" applies here too — it's one request
+either way, and the response doesn't even try to tell the frontend where each task landed
+in the board, only which ref maps to which id — `job.accepted`, re-polled, is the only
+source of truth for "which rows are Added").
+
+**Grouping**: proposed tasks split into a primary list (top-level, grounded) with children
+indented directly beneath their parent regardless of the model's own array order, and a
+trailing "Suggested additions — not in your document" section for top-level `grounded:
+false` items — mirroring the same split the backend's prompt asks the model to produce,
+enforced visually rather than by dropping data (backend/DESIGN.md §6: the cap on
+ungrounded items is a note, never a hard truncation, for exactly this reason).
+
+Entry point: a persistent "Break down a document" action on the tasks page (both the
+empty state and the populated board), not a separate top-level nav item — this is a
+project-scoped action, same as Export.
+
 ---
 
 ## 5. Auth
@@ -652,12 +728,19 @@ Restore is **opt-in, never automatic**: a banner offers "Restore" / "Discard". D
 | **M13** *(delivered)* | Optional CV-style Profile page: photo, name/designation/skills, 5 AI-enhanced bio fields via `PlainTextEnhanceField` — see §11 | Fill in a bio field, Enhance with AI → suggestion panel, never a silent overwrite; Save Changes persists it; reload confirms |
 | **M14** *(delivered)* | Conversations page: search/star/sort/delete/resume, wired to the chat widget via `ChatWidgetProvider` — see §10 | Resume a non-current conversation from `/conversations` → the floating widget opens on it, not whatever was last active |
 | **M15** *(delivered)* | Dashboard "Suggested for you" card: proactive GitHub suggestions, dismissable, independent of any chat turn — see §11 | Add a project with a new technology (toggle on) → a suggestion appears on the Dashboard without opening chat; dismiss → never reappears |
+| **M16** *(delivered)* | Task foundation: grouped (not kanban) task list per project, toaster/skeleton/empty-state primitives, `date-fns` finally wired up via `lib/dates.ts`, full keyboard-free CRUD + inline editing | Create/edit/delete a task by hand on `/projects/[id]/tasks`; kill the backend mid-edit → optimistic change rolls back with an error toast |
+| **M17** *(delivered)* | AI work breakdown (flagship): launcher, shared `JobStageStepper`, reducer-driven review with cascade-reject and the promotion warning — see §4.5 | Upload a spec → propose a task tree → edit two rows, uncheck a parent and see the promotion warning, accept the rest → tasks appear with an AI badge; refresh mid-review resumes from `?job=` |
+| **M18** *(delivered)* | Jarvis becomes work-aware: no new frontend surface — existing tool-status rows (§10.2) already render `task_search`/`task_summary`'s "Checking your tasks…" label with no code change needed | Ask Jarvis "what's blocked on X" in the existing chat widget and get a tool-grounded answer |
 
 M0–M2 sequential. M3 independent, parallel with M1/M2. M6–M8 strictly ordered; M4 precedes M6.
 M12 needs M2 (real data) and a working chat SSE endpoint from the backend; it does not
 depend on M6–M8. M13 reuses M8's suggestion-panel pattern directly. M14 extends M12. M15 is
 independent frontend-wise (a read of one new endpoint) but needs the backend job/cron
-infrastructure documented in `backend/DESIGN.md` §6 to have anything to display.
+infrastructure documented in `backend/DESIGN.md` §6 to have anything to display. M16 is
+independent of M6–M15 (tasks have no AI surface of their own). M17 depends on M16 (tasks
+must exist to accept into) and reuses M6's stage-stepper/polling machinery, generalized
+rather than duplicated. M18 needed no frontend work at all — the existing tool-status
+rendering from M12 was already generic over tool name.
 
 ## 10. Jarvis chat widget + Conversations page
 

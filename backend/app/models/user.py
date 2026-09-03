@@ -23,7 +23,7 @@ class ChatProvider(StrEnum):
     """
 
     GEMINI = "gemini"
-    OLLAMA = "ollama"
+    OPENAI = "openai"
 
 
 # Shared SQLAlchemy Enum instances, same reasoning as provider_name_enum in

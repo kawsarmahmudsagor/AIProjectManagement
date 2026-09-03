@@ -1,7 +1,7 @@
 import uuid
 from datetime import date
 
-from sqlalchemy import ARRAY, Boolean, Date, ForeignKey, String, Text
+from sqlalchemy import ARRAY, Boolean, Date, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -17,6 +17,16 @@ class Project(Base, UUIDPk, Timestamps):
     """
 
     __tablename__ = "projects"
+    __table_args__ = (
+        # id alone is already the PK and already unique — this composite constraint
+        # exists so tasks.(project_id, user_id) can carry a composite FK into
+        # projects(id, user_id) (see models/task.py), making a cross-tenant task-parent
+        # attachment structurally unrepresentable at the DB level. Must stay in sync with
+        # the migration that creates it (uq_projects_id_user_id) — Base.metadata.create_all
+        # (used by the test suite) only sees constraints declared here, not ones only
+        # ever issued as raw Alembic DDL.
+        UniqueConstraint("id", "user_id", name="uq_projects_id_user_id"),
+    )
 
     user_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
@@ -44,3 +54,10 @@ class Project(Base, UUIDPk, Timestamps):
 
     user: Mapped["User"] = relationship(back_populates="projects")  # noqa: F821
     documents: Mapped[list["Document"]] = relationship(back_populates="project")  # noqa: F821
+    # passive_deletes=True is required, not cosmetic: without it, delete_project's
+    # `await db.delete(project)` would SELECT every task and DELETE them one-by-one in
+    # Python instead of letting Postgres's ON DELETE CASCADE (on tasks.project_id, via
+    # the composite FK in models/task.py) do it in one statement.
+    tasks: Mapped[list["Task"]] = relationship(  # noqa: F821
+        back_populates="project", cascade="all, delete-orphan", passive_deletes=True
+    )

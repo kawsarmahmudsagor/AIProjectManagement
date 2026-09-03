@@ -1,6 +1,7 @@
+from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -20,14 +21,20 @@ def _to_out(s: RepoSuggestion) -> RepoSuggestionOut:
         repo=RepoOut(**s.repo),
         computed_at=s.computed_at,
         dismissed=s.dismissed,
+        source=s.source.value,
     )
 
 
 @router.get("/github", response_model=list[RepoSuggestionOut])
 async def list_github_suggestions(
-    user: User = CurrentUser, db: AsyncSession = Depends(get_db)
+    scope: Literal["recent", "all"] = Query("recent"),
+    user: User = CurrentUser,
+    db: AsyncSession = Depends(get_db),
 ) -> list[RepoSuggestionOut]:
-    suggestions = await suggestion_service.list_active_suggestions(db, user.id)
+    """`scope=recent` (default, the Dashboard card): active suggestions from within the
+    last day or so. `scope=all` (the Conversations page's Suggestions section): the
+    complete history, dismissed or not — see suggestion_service.list_suggestions."""
+    suggestions = await suggestion_service.list_suggestions(db, user.id, scope=scope)
     return [_to_out(s) for s in suggestions]
 
 

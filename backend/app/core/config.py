@@ -24,14 +24,7 @@ class Settings(BaseSettings):
 
     saq_concurrency: int = 4
 
-    ollama_default_base_url: str = "http://localhost:11434"
-    ollama_default_model: str = "gemma4:e2b"
-    # Safety net only: if ollama_default_model or a user's saved default_model is ever a
-    # `-cloud` tag, registry.get_provider() substitutes this local model for extraction
-    # specifically (Ollama Cloud doesn't support structured output — see
-    # providers/ollama.py is_ollama_cloud_model and docs/RESEARCH.md §B3). Not normally
-    # reached since the Settings dropdown only offers local gemma4 models.
-    ollama_extraction_fallback_model: str = "gemma4:e2b"
+    openai_default_model: str = "gpt-4.1-mini"
     gemini_default_model: str = "gemini-3.5-flash"
 
     # Jarvis's github_search tool (app/agents/chat_tools.py). A single shared app-level
@@ -49,6 +42,10 @@ class Settings(BaseSettings):
     github_suggestions_repos_per_technology: int = 3
     github_suggestions_cron_batch_size: int = 10
     github_suggestions_min_call_interval_seconds: float = 2.5
+    # How far back the Dashboard card's "recent" view looks (the Conversations page's
+    # Suggestions section has no such window — it shows the full history instead) — see
+    # suggestion_service.list_suggestions's `scope` parameter.
+    github_suggestions_dashboard_window_hours: int = 24
 
     @property
     def cors_origin_list(self) -> list[str]:
@@ -69,3 +66,18 @@ def get_settings() -> Settings:
     settings.uploads_dir.mkdir(parents=True, exist_ok=True)
     settings.exports_dir.mkdir(parents=True, exist_ok=True)
     return settings
+
+
+# AI work-breakdown (services/breakdown_service.py) T-shirt-size default estimates, in
+# minutes. The model only ever emits xs/s/m/l/xl (an enum can't hallucinate "13.5 hours");
+# this is the one deterministic place that maps a size to a number, and it's only ever a
+# *default* for the editable hours field on each review row — never summed or shown as a
+# schedule (backend/DESIGN.md §8's "no rollup total" rule). A plain module constant, not a
+# Settings field, since it's a product/tuning knob reviewed in code, not an env var.
+BREAKDOWN_ESTIMATE_SIZE_MINUTES: dict[str, int] = {
+    "xs": 30,
+    "s": 120,
+    "m": 240,
+    "l": 480,
+    "xl": 960,
+}

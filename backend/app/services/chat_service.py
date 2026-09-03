@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agents.chat_tools import TOOL_LABELS, build_tools
 from app.agents.chatbot_graph import stream_chat
 from app.agents.chatbot_graph import stringify_content as _stringify_content
+from app.core.ownership import ResourceNotFoundError, owned
 from app.models.ai_provider_setting import ProviderName
 from app.models.chat import ChatMessage, ChatRole, ChatSession
 from app.models.user import ChatProvider, User
@@ -36,8 +37,14 @@ COMPACTION_THRESHOLD = 50
 _COMPACTION_KEEP_RECENT = 10
 
 
-class ChatSessionNotFoundError(Exception):
-    pass
+class ChatSessionNotFoundError(ResourceNotFoundError):
+    """Subclasses ResourceNotFoundError so the app-wide 404 handler catches it via the
+    exception's MRO — but keeps its own type so routers/chat.py's SSE generator can still
+    catch it specifically (an exception handler can't help once a StreamingResponse has
+    already started sending 200 OK + bytes)."""
+
+    def __init__(self, session_id: UUID | str):
+        super().__init__("Chat session", session_id)
 
 
 async def _create_session_with_greeting(db: AsyncSession, user: User) -> ChatSession:
@@ -146,9 +153,10 @@ async def activate_session(db: AsyncSession, user_id: UUID, session_id: UUID) ->
 
 
 async def _get_owned_session(db: AsyncSession, user_id: UUID, session_id: UUID) -> ChatSession:
-    session = await db.get(ChatSession, session_id)
-    if session is None or session.user_id != user_id:
-        raise ChatSessionNotFoundError(str(session_id))
+    stmt = owned(ChatSession, user_id).where(ChatSession.id == session_id)
+    session = (await db.execute(stmt)).scalar_one_or_none()
+    if session is None:
+        raise ChatSessionNotFoundError(session_id)
     return session
 
 

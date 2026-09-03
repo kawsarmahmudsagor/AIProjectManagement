@@ -5,6 +5,8 @@ backend/DESIGN.md §6, so business logic stays unit-testable with no queue invol
 from uuid import UUID
 
 from app.core.database import async_session_factory
+from app.services.brag_document_service import run_brag_document_job as _run_brag_document_job
+from app.services.breakdown_service import run_breakdown_job as _run_breakdown_job
 from app.services.chat_service import compact_history as _compact_history
 from app.services.chat_service import generate_session_title as _generate_session_title
 from app.services.extraction_service import run_extraction_job as _run_extraction_job
@@ -16,6 +18,16 @@ from app.services.suggestion_service import (
 async def run_extraction_job(ctx, job_id: str) -> None:
     async with async_session_factory() as db:
         await _run_extraction_job(db, UUID(job_id))
+
+
+async def run_breakdown_job(ctx, job_id: str) -> None:
+    async with async_session_factory() as db:
+        await _run_breakdown_job(db, UUID(job_id))
+
+
+async def run_brag_document_job(ctx, job_id: str) -> None:
+    async with async_session_factory() as db:
+        await _run_brag_document_job(db, UUID(job_id))
 
 
 async def generate_session_title(ctx, session_id: str) -> None:

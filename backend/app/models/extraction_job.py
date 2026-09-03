@@ -21,6 +21,14 @@ class JobStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+# Shared Enum instance, same reasoning as provider_name_enum/task_status_enum — declared
+# once so the Postgres TYPE isn't emitted twice. BreakdownJob (models/breakdown_job.py)
+# reuses this exact enum instead of declaring its own — same stage names, same cancel
+# semantics, same stale-job reaper — so a migration adding a breakdown_jobs.status column
+# must reference this TYPE with create_type=False rather than re-declaring the enum.
+job_status_enum = Enum(JobStatus, name="job_status")
+
+
 class ExtractionJob(Base, UUIDPk):
     """status doubles as the frontend's poll `stage` while pending (queued -> parsing ->
     extracting -> structuring), see backend/DESIGN.md §6 for the full state machine and
@@ -41,7 +49,7 @@ class ExtractionJob(Base, UUIDPk):
 
     provider: Mapped[ProviderName] = mapped_column(provider_name_enum, nullable=False)
     status: Mapped[JobStatus] = mapped_column(
-        Enum(JobStatus, name="job_status"), default=JobStatus.QUEUED, nullable=False, index=True
+        job_status_enum, default=JobStatus.QUEUED, nullable=False, index=True
     )
 
     result: Mapped[dict | None] = mapped_column(JSON, nullable=True)

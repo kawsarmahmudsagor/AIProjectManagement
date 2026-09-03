@@ -3,11 +3,12 @@ import logging
 from datetime import UTC, datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.deps import CurrentUser
+from app.core.ownership import require_owned
 from app.models.extraction_job import ExtractionJob, JobStatus
 from app.models.user import User
 from app.schemas.common import ErrorDetail
@@ -38,10 +39,7 @@ def _to_out(job: ExtractionJob) -> JobStatusOut:
 async def get_job_status(
     job_id: UUID, user: User = CurrentUser, db: AsyncSession = Depends(get_db)
 ) -> JobStatusOut:
-    job = await db.get(ExtractionJob, job_id)
-    if job is None or job.user_id != user.id:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Job not found")
-
+    job = await require_owned(db, ExtractionJob, job_id, user.id, resource="Job")
     return _to_out(job)
 
 
@@ -49,9 +47,7 @@ async def get_job_status(
 async def cancel_job(
     job_id: UUID, user: User = CurrentUser, db: AsyncSession = Depends(get_db)
 ) -> JobStatusOut:
-    job = await db.get(ExtractionJob, job_id)
-    if job is None or job.user_id != user.id:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Job not found")
+    job = await require_owned(db, ExtractionJob, job_id, user.id, resource="Job")
 
     if job.status in _CANCELLABLE:
         # Mark the row cancelled first — the frontend's poll should stop treating this

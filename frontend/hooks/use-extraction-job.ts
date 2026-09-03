@@ -1,22 +1,12 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
+import { useJobPoll } from "@/hooks/use-job-poll";
 import { getExtractionJob } from "@/lib/documents";
-import type { JobStatus } from "@/lib/types";
 
-const TERMINAL_STATUSES: JobStatus[] = ["succeeded", "failed", "cancelled"];
-const POLL_INTERVAL_MS = 1200;
-
-/** Polls GET /extraction-jobs/{id} until it lands on succeeded/failed. `jobId` is null
- * before an upload starts — the query stays disabled until then. */
+/** Polls GET /extraction-jobs/{id} until it lands on succeeded/failed/cancelled. `jobId`
+ * is null before an upload starts — the query stays disabled until then. Thin wrapper
+ * over the generic useJobPoll (shared with AI work-breakdown jobs) so this call site and
+ * its external behavior are unchanged. */
 export function useExtractionJob(jobId: string | null) {
-  return useQuery({
-    queryKey: ["extraction-job", jobId],
-    queryFn: () => getExtractionJob(jobId as string),
-    enabled: jobId !== null,
-    refetchInterval: (query) => {
-      const status = query.state.data?.status;
-      return status && TERMINAL_STATUSES.includes(status) ? false : POLL_INTERVAL_MS;
-    },
-  });
+  return useJobPoll(["extraction-job", jobId], () => getExtractionJob(jobId as string), jobId !== null);
 }

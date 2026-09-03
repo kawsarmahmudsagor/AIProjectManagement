@@ -1,0 +1,97 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: A4; margin: 0; }
+  body { font-family: "Segoe UI", Arial, sans-serif; color: #1a1a2e; line-height: 1.5; }
+  h1 { font-size: 22px; margin-bottom: 2px; color: #1F497D; }
+  .subtitle { color: #666666; font-style: italic; font-size: 12px; margin-bottom: 18px; }
+  h2 { font-size: 16px; margin-top: 20px; margin-bottom: 4px; color: #111111; }
+  h3 { font-size: 14px; margin-top: 12px; margin-bottom: 2px; color: #111111; }
+  h4 { font-size: 13px; margin-top: 10px; margin-bottom: 2px; color: #222222; }
+  h5 { font-size: 12px; margin-top: 6px; margin-bottom: 2px; color: #333333; }
+  ul { margin: 4px 0 10px 0; padding-left: 20px; }
+  ul ul { margin: 2px 0 6px 0; }
+  li { margin-bottom: 3px; color: #333333; }
+  .key-contribution { color: #666666; font-style: italic; font-size: 10.5px; margin: 2px 0 10px 0; }
+  .empty { color: #777777; font-style: italic; }
+</style>
+</head>
+<body>
+  <h1>Monthly Brag Document - {{ job.member_name }}</h1>
+  <div class="subtitle">
+    Period: {{ job.target_month }}
+    &nbsp;|&nbsp; Total Logged Work: {{ "%.1f"|format(stats.total_hours or 0) }} hrs
+    {% if stats.included_weeks %}
+    &nbsp;|&nbsp; Sprints: {{ stats.included_weeks | join(", ") }}
+    {% endif %}
+  </div>
+
+  <h2>Work Accomplishments</h2>
+
+  <h3>Technical Contribution</h3>
+  {% set tech_groups = result.technical_contributions or [] %}
+  {% if tech_groups %}
+    {% for group in tech_groups %}
+      <h4>{{ group.project_name or "On Demand / Miscellaneous" }}</h4>
+      {% for sub in group.subsections or [] %}
+        {% if sub.heading %}<h5>{{ sub.heading }}</h5>{% endif %}
+        <ul>
+          {% for bullet in sub.bullets %}
+          <li>{{ bullet }}</li>
+          {% endfor %}
+        </ul>
+      {% endfor %}
+      {% if group.bullets %}
+      <ul>
+        {% for bullet in group.bullets %}
+        <li>{{ bullet }}</li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+      {% if group.key_contribution %}
+      <p class="key-contribution">Key Contribution: {{ group.key_contribution }}</p>
+      {% endif %}
+    {% endfor %}
+  {% else %}
+    <p class="empty">No technical contributions were found for this period.</p>
+  {% endif %}
+
+  {% set overall_impact = result.overall_impact or [] %}
+  {% if overall_impact %}
+  <h3>Overall Impact</h3>
+  <ul>
+    {% for area in overall_impact %}
+    {% if area.category and area.summary %}
+    <li><strong>{{ area.category }}:</strong> {{ area.summary }}</li>
+    {% endif %}
+    {% endfor %}
+  </ul>
+  {% endif %}
+
+  <h3>Team Support &amp; Collaboration</h3>
+  {% set support_bullets = result.team_support_bullets or [] %}
+  {% if support_bullets %}
+  <ul>
+    {% for bullet in support_bullets %}
+    <li>{{ bullet }}</li>
+    {% endfor %}
+  </ul>
+  {% else %}
+    <p class="empty">No team support activity was logged for this period.</p>
+  {% endif %}
+
+  <h2>Learning &amp; Development (L&amp;D)</h2>
+  {% set learning_bullets = result.learning_bullets or [] %}
+  {% if learning_bullets %}
+  <ul>
+    {% for bullet in learning_bullets %}
+    <li>{{ bullet }}</li>
+    {% endfor %}
+  </ul>
+  {% else %}
+    <p class="empty">No learning &amp; development activity was logged for this period.</p>
+  {% endif %}
+</body>
+</html>

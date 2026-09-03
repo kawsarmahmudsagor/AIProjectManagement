@@ -1,11 +1,11 @@
 import Link from "next/link";
 import { Card } from "@/components/ui/card";
 import { DeleteProjectButton } from "@/components/projects/delete-project-button";
+import { formatMonthYear } from "@/lib/dates";
 import type { ProjectSummary } from "@/lib/types";
 
 function formatRange(p: ProjectSummary) {
-  const fmt = (d: string) => new Date(d).toLocaleDateString("en-US", { month: "short", year: "numeric" });
-  return `${fmt(p.start_date)} – ${p.is_current ? "Present" : p.end_date ? fmt(p.end_date) : ""}`;
+  return `${formatMonthYear(p.start_date)} – ${p.is_current ? "Present" : p.end_date ? formatMonthYear(p.end_date) : ""}`;
 }
 
 export function ProjectCard({ project }: { project: ProjectSummary }) {

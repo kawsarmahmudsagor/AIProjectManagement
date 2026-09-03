@@ -1,14 +1,18 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from playwright.async_api import async_playwright
 
 from app.core.config import get_settings
+from app.core.ownership import ResourceNotFoundError
 from app.routers import (
     ai,
     ai_settings,
     auth,
+    brag_documents,
+    breakdown,
     chat,
     documents,
     export,
@@ -16,7 +20,9 @@ from app.routers import (
     profile,
     projects,
     suggestions,
+    tasks,
 )
+from app.services.task_service import TaskValidationError
 from app.workers import bridge, worker_process
 from app.workers.settings import queue as extraction_queue
 
@@ -66,6 +72,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.exception_handler(ResourceNotFoundError)
+async def _resource_not_found_handler(request: Request, exc: ResourceNotFoundError) -> JSONResponse:
+    return JSONResponse(status_code=404, content={"detail": f"{exc.resource} not found"})
+
+
+@app.exception_handler(TaskValidationError)
+async def _task_validation_handler(request: Request, exc: TaskValidationError) -> JSONResponse:
+    return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(projects.router, prefix="/api/v1")
 app.include_router(documents.router, prefix="/api/v1")
@@ -76,6 +93,12 @@ app.include_router(export.router, prefix="/api/v1")
 app.include_router(chat.router, prefix="/api/v1")
 app.include_router(profile.router, prefix="/api/v1")
 app.include_router(suggestions.router, prefix="/api/v1")
+app.include_router(tasks.router, prefix="/api/v1")
+app.include_router(tasks.tasks_router, prefix="/api/v1")
+app.include_router(breakdown.router, prefix="/api/v1")
+app.include_router(breakdown.breakdown_jobs_router, prefix="/api/v1")
+app.include_router(brag_documents.router, prefix="/api/v1")
+app.include_router(brag_documents.brag_document_jobs_router, prefix="/api/v1")
 
 
 @app.get("/healthz", tags=["meta"])

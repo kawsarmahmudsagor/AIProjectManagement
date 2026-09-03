@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { useExtractionJob } from "@/hooks/use-extraction-job";
 import { useShowProviderErrorModal } from "@/components/layout/provider-error-modal";
+import { JobStageStepper } from "@/components/ui/job-stage-stepper";
 import { ApiError } from "@/lib/api-client";
 import { ACCEPTED_EXTENSIONS, MAX_UPLOAD_SIZE_MB, cancelExtractionJob, uploadDocument } from "@/lib/documents";
 import { cn } from "@/lib/utils";
@@ -251,17 +252,11 @@ export function DocumentUpload({
             </Button>
           )}
         </div>
-        <div className="flex gap-1.5">
-          {STAGE_ORDER.map((stage, i) => (
-            <div
-              key={stage}
-              className={cn(
-                "h-1 flex-1 rounded-full bg-surface-2",
-                i <= currentStageIndex && effectivePhase === "polling" && "bg-accent",
-              )}
-            />
-          ))}
-        </div>
+        <JobStageStepper
+          stages={STAGE_ORDER}
+          currentIndex={currentStageIndex}
+          active={effectivePhase === "polling"}
+        />
       </Card>
     );
   }

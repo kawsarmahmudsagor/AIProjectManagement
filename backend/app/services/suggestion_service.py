@@ -1,5 +1,6 @@
 import logging
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 from uuid import UUID
 
 from sqlalchemy import func, or_, select
@@ -12,6 +13,48 @@ from app.services.github_cache_service import get_cached_repos
 from app.services.portfolio_service import compute_technology_frequency
 
 logger = logging.getLogger(__name__)
+
+# Excluded from proactive suggestion generation ONLY (recompute_user_suggestions below) —
+# never from compute_technology_frequency's own output, which agents/chat_tools.py's
+# portfolio_analysis tool and this app's other analytics still need to report honestly,
+# generic-stack entries included. The point here is narrower: a user's "top technologies"
+# by raw project count skews toward whatever language/framework/DB they use on everything
+# (Python, TypeScript, SQL...), crowding out the more specific, interesting technology a
+# repo suggestion is actually useful for (an LLM framework, a RAG tool, a notable Unity/AR
+# plugin, ...). Filtering happens before ranking, so a filtered-out entry never occupies
+# one of the top-N slots in the first place — it isn't merely deprioritized.
+#
+# Free-text, single-token match against whatever a user typed into a project's
+# `technologies` field — a project listing both "Unity" (generic, filtered) and, say,
+# "AR Foundation" (specific, kept) still surfaces the latter. Not exhaustive; extend this
+# set as more generic entries turn up in practice.
+_GENERIC_TECHNOLOGIES: frozenset[str] = frozenset(
+    {
+        # Languages
+        "python", "javascript", "typescript", "java", "c", "c++", "c#", "go", "golang",
+        "rust", "ruby", "php", "swift", "kotlin", "scala", "dart", "html", "html5", "css",
+        "css3", "sql", "bash", "shell", "powershell",
+        # Core runtimes / broad platforms
+        "node", "node.js", "nodejs", ".net", "dotnet", "jvm",
+        # General-purpose web frameworks/libraries
+        "react", "react.js", "vue", "vue.js", "angular", "next.js", "nextjs", "nuxt",
+        "express", "express.js", "fastapi", "django", "flask", "spring", "spring boot",
+        "asp.net", "jquery", "bootstrap", "tailwind", "tailwind css",
+        # Databases / data-layer basics
+        "sql alchemy", "sqlalchemy", "postgresql", "postgres", "mysql", "sqlite",
+        "mongodb", "redis", "prisma",
+        # Generic infra/tooling
+        "docker", "kubernetes", "git", "github", "github actions", "npm", "pip", "yarn",
+        "webpack", "vite", "jest", "pytest", "rest", "rest api", "api", "json", "xml",
+        "yaml", "aws", "azure", "gcp", "linux", "windows", "macos",
+        # Game-engine basics (kept generic only — a named plugin/toolkit still counts)
+        "unity", "unreal", "unreal engine", "unity engine",
+    }
+)
+
+
+def _is_suggestable_technology(name: str) -> bool:
+    return name.strip().lower() not in _GENERIC_TECHNOLOGIES
 
 
 async def get_suggested_repo_full_names(db: AsyncSession, user_id: UUID) -> set[str]:
@@ -74,7 +117,8 @@ async def recompute_user_suggestions(db: AsyncSession, user_id: UUID, *, force: 
                 return False
 
     freq = await compute_technology_frequency(db, user_id)
-    top_technologies = freq["technologies"][: settings.github_suggestions_top_technologies]
+    suggestable = [t for t in freq["technologies"] if _is_suggestable_technology(t["name"])]
+    top_technologies = suggestable[: settings.github_suggestions_top_technologies]
     top_keys = {t["name"].lower() for t in top_technologies}
 
     existing = (
@@ -142,14 +186,26 @@ async def recompute_user_suggestions(db: AsyncSession, user_id: UUID, *, force: 
     return rate_limited
 
 
-async def list_active_suggestions(db: AsyncSession, user_id: UUID) -> list[RepoSuggestion]:
-    rows = (
-        await db.execute(
-            select(RepoSuggestion)
-            .where(RepoSuggestion.user_id == user_id, RepoSuggestion.dismissed.is_(False))
-            .order_by(RepoSuggestion.technology, RepoSuggestion.rank)
-        )
-    ).scalars().all()
+async def list_suggestions(
+    db: AsyncSession, user_id: UUID, *, scope: Literal["recent", "all"] = "recent"
+) -> list[RepoSuggestion]:
+    """`scope="recent"` (the Dashboard card): active (never-dismissed) suggestions from
+    within the last `github_suggestions_dashboard_window_hours` — this is what stops the
+    card from accumulating every suggestion ever computed. `scope="all"` (the Conversations
+    page's Suggestions section): the complete history for this user, dismissed or not, most
+    recent first — dismissing there (or on the Dashboard) is the same durable
+    RepoSuggestion.dismissed flag either way, so a dismissal made on one page is reflected
+    on the other the next time it's loaded."""
+    stmt = select(RepoSuggestion).where(RepoSuggestion.user_id == user_id)
+    if scope == "recent":
+        settings = get_settings()
+        window_start = datetime.now(UTC) - timedelta(hours=settings.github_suggestions_dashboard_window_hours)
+        stmt = stmt.where(
+            RepoSuggestion.dismissed.is_(False), RepoSuggestion.computed_at >= window_start
+        ).order_by(RepoSuggestion.technology, RepoSuggestion.rank)
+    else:
+        stmt = stmt.order_by(RepoSuggestion.computed_at.desc())
+    rows = (await db.execute(stmt)).scalars().all()
     return list(rows)
 
 

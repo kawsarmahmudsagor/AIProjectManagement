@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronLeft, LayoutDashboard, MessagesSquare, Settings, LogOut, UserRound } from "lucide-react";
+import { ChevronLeft, FileBadge, LayoutDashboard, MessagesSquare, Settings, LogOut, UserRound } from "lucide-react";
 import Link from "next/link";
 import { useRouter, usePathname } from "next/navigation";
 import { useState } from "react";
@@ -12,6 +12,7 @@ import { cn } from "@/lib/utils";
 const NAV_TOP = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/conversations", label: "Conversations", icon: MessagesSquare },
+  { href: "/brag-documents", label: "Brag Documents", icon: FileBadge },
   { href: "/profile", label: "Profile", icon: UserRound },
 ];
 const NAV_BOTTOM = [{ href: "/settings/ai-providers", label: "Settings", icon: Settings }];

@@ -23,13 +23,17 @@ backend/
     │   ├── config.py             pydantic-settings Settings (env-driven)
     │   ├── database.py           async engine/session, Base, get_db dependency
     │   ├── security.py           password hashing, JWT issue/verify, Fernet encrypt/decrypt
-    │   └── deps.py                get_current_user, get_settings, pagination
+    │   ├── deps.py                get_current_user, get_settings, pagination
+    │   └── ownership.py           owned()/require_owned() — the one seam every user-scoped
+    │                                resource looks itself up through; see §3's tasks note
     ├── models/                   SQLAlchemy 2.0 declarative models
     │   ├── base.py                UUIDPk + Timestamps mixins
     │   ├── user.py                name fields, chat_provider, preemptive-suggestions toggle
     │   ├── project.py
+    │   ├── task.py                 Task, TaskStatus/Priority/Source — see §2
     │   ├── document.py
-    │   ├── extraction_job.py
+    │   ├── extraction_job.py       also exports the shared job_status_enum, reused by breakdown_job.py
+    │   ├── breakdown_job.py        BreakdownJob — see §2
     │   ├── ai_provider_setting.py
     │   ├── chat.py                 ChatSession, ChatMessage, ChatRole — see §2, Jarvis plan.md Part A/G
     │   ├── profile.py              UserProfile — see §2, plan.md Part E
@@ -37,13 +41,16 @@ backend/
     │   └── repo_suggestion.py      per-user suggested-repo log — plan.md Part H
     ├── schemas/                  Pydantic request/response models
     │   ├── common.py              RichText, PageParams
-    │   ├── auth.py  project.py  document.py  job.py  ai_settings.py
+    │   ├── auth.py  project.py  task.py  document.py  job.py  breakdown.py  ai_settings.py
     │   ├── chat.py  profile.py  suggestion.py
     ├── routers/                  one router per resource, included in main.py
-    │   ├── auth.py  projects.py  documents.py  jobs.py  ai.py  ai_settings.py  export.py
-    │   ├── chat.py  profile.py  suggestions.py
+    │   ├── auth.py  projects.py  tasks.py  documents.py  jobs.py  breakdown.py
+    │   ├── ai.py  ai_settings.py  export.py  chat.py  profile.py  suggestions.py
     ├── services/                 business logic, framework-agnostic where possible
     │   ├── project_service.py
+    │   ├── task_service.py         CRUD, ownership + depth-cap validation, position/reorder math
+    │   ├── breakdown_service.py    normalize_breakdown() (repairs, never rejects, malformed
+    │   │                            provider output), run_breakdown_job, accept/dismiss — see §6
     │   ├── extraction_service.py  orchestrates ingest -> provider -> persist job result
     │   ├── export_service.py
     │   ├── chat_service.py         session lifecycle, SSE turn orchestration, title-gen,
@@ -58,17 +65,23 @@ backend/
     │   └── suggestion_service.py   proactive-suggestion computation, dismissal, no-repeat
     │                                log shared with chat_tools.github_search — plan.md Part H
     ├── providers/                 the AI abstraction — see §4
-    │   ├── base.py                 Protocol: extract(), rewrite(), test_connection(), get_chat_model()
+    │   ├── base.py                 Protocol: extract(), rewrite(), propose_breakdown(),
+    │   │                            test_connection(), get_chat_model()
     │   ├── gemini.py
-    │   ├── ollama.py
+    │   ├── openai.py
     │   ├── prompts.py              persona-keyed system prompts, rewrite prompt builder,
-    │   │                            Jarvis's chatbot system prompt, profile-enhance prompts,
+    │   │                            breakdown prompt builder (grounding contract), Jarvis's
+    │   │                            chatbot system prompt, profile-enhance prompts,
     │   │                            shared AGENT_SAFETY_BOUNDARIES block
+    │   ├── schema_utils.py          inline_refs() — flattens $defs/$ref for provider schemas;
+    │   │                            see §2's breakdown_jobs note on why the breakdown schema
+    │   │                            must stay non-recursive
     │   └── registry.py             resolves a user's configured provider (purpose: extract|rewrite|chat)
     ├── agents/                    LangGraph orchestration — see §4
     │   ├── rewrite_graph.py        one-node StateGraph wrapping provider.rewrite()
     │   ├── chatbot_graph.py        Jarvis: per-request ReAct-style tool-calling graph — see §4
-    │   ├── chat_tools.py           project_search, portfolio_analysis, github_search tools
+    │   ├── chat_tools.py           project_search, portfolio_analysis, github_search,
+    │   │                            task_search, task_summary tools
     │   └── chat_app_guide.md       hand-maintained knowledge doc baked into Jarvis's system
     │                                prompt — the only place platform-feature answers come from
     ├── ingest/
@@ -82,7 +95,8 @@ backend/
         │                          bridging from FastAPI's Proactor-loop process (Windows)
         ├── worker_process.py      auto-spawns the SAQ worker as a child process on startup
         ├── tasks.py               thin per-task wrappers over the services above
-        ├── stale_jobs.py          reap_stale_jobs cron — terminates a stuck extraction job
+        ├── stale_jobs.py          reap_stale_jobs cron — sweeps both extraction_jobs and
+        │                          breakdown_jobs for a stuck/crashed-worker job
         └── suggestion_refresh.py  refresh_stale_suggestions cron — plan.md Part H
 ```
 
@@ -106,7 +120,7 @@ users
   first_name  middle_name (nullable)  last_name (nullable)  preferred_name (nullable)
                  -- only first_name is required (registration); Jarvis's greeting uses
                     preferred_name, falling back to first_name — never the others
-  chat_provider (enum: gemini | ollama, default gemini)       -- which connection drives Jarvis
+  chat_provider (enum: gemini | openai, default gemini)       -- which connection drives Jarvis
   chatbot_preemptive_github_suggestions (bool, default false) -- Settings > Chatbot toggle;
                  -- gates both in-chat volunteered repo suggestions and the proactive
                     suggestion background job (§6, plan.md Part H)
@@ -124,6 +138,26 @@ projects
   project_url (nullable)
   created_at  updated_at
 
+tasks
+  id (uuid, pk)  user_id (fk -> users, cascade)  project_id (fk, composite with user_id into
+                                                    projects(id, user_id) — makes a cross-tenant
+                                                    parent attachment structurally unrepresentable)
+  parent_id (fk -> tasks, cascade, nullable)  -- depth capped at 1, enforced in task_service,
+                                                  not the schema (a subtask can't itself parent)
+  title  description (plain text, not the {html,text} RichText pair — tasks are neither
+                       exported nor rich-text-edited, same reasoning as user_profiles above)
+  status (enum: todo | in_progress | blocked | done)     -- fixed, not per-project configurable;
+  priority (enum: low | medium | high | urgent)             enum declaration order is load-bearing
+                                                               (ORDER BY status/priority needs no CASE)
+  source (enum: manual | ai)      -- provenance; set once at insert (envelope-level on bulk
+                                      create), absent from the update schema — can never flip
+  estimate_minutes (nullable)  due_date (date, nullable — no users.timezone column, so plain
+                                            Date, not timestamptz, same call as projects' dates)
+  position (int)                 -- rewritten as a whole ordered list on reorder/status-change,
+                                     never a per-move increment (no DnD library in this frontend)
+  completed_at (timestamptz, nullable — set/cleared automatically on a status transition)
+  created_at  updated_at
+
 documents
   id (uuid, pk)  user_id (fk)  project_id (fk, nullable — set once the extraction is saved
                                             onto a project; a document can exist standalone
@@ -133,7 +167,7 @@ documents
 
 extraction_jobs
   id (uuid, pk)  user_id (fk)  document_id (fk)  project_id (fk, nullable)
-  provider (enum: gemini | ollama)
+  provider (enum: gemini | openai)
   status (enum: queued | parsing | extracting | structuring | succeeded | failed)  -- doubles
                                                                                      as the
                                                                                      frontend's
@@ -142,11 +176,29 @@ extraction_jobs
   error_code (nullable)  error_message (nullable)
   created_at  started_at  finished_at
 
+breakdown_jobs
+  id (uuid, pk)  user_id (fk)  project_id (fk, NOT NULL)  document_id (fk, nullable — a
+                                prompt-only breakdown has no document; the inverse
+                                nullability of extraction_jobs, which is why this is its own
+                                table rather than a `kind` column on ExtractionJob)
+  provider (enum: gemini | openai)
+  status (enum: shares the exact `job_status` TYPE with extraction_jobs — same stages,
+                same cancel semantics, same stale-job reaper)
+  prompt (text, nullable)  max_tasks (int, default 25)  is_scanned (bool)
+  result (JSONB, nullable)       -- LLMBreakdownResult (flat tasks[] + confidence_notes[]),
+                                    already repaired by services.breakdown_service.normalize_breakdown
+  accepted_refs (JSON, dict: proposed-task ref -> created Task id)  -- not just a flag; lets a
+                                second partial-accept batch resolve a parent_ref against a task
+                                created by an earlier batch, and makes a duplicate ref a no-op
+  dismissed_refs (JSON, list of refs)
+  error_code (nullable)  error_message (nullable)
+  created_at  started_at  finished_at
+
 ai_provider_settings
   id (uuid, pk)  user_id (fk)
-  provider (enum: gemini | ollama)
-  encrypted_api_key (nullable — required for gemini; optional for ollama/cloud)
-  base_url (nullable — ollama only, default http://localhost:11434)
+  provider (enum: gemini | openai)
+  encrypted_api_key (nullable — required for both gemini and openai)
+  base_url (nullable — unused by either current provider)
   default_model (nullable)
   is_default (bool)
   created_at  updated_at
@@ -226,10 +278,14 @@ GET    /projects/{id}                                                 -> Project
 PATCH  /projects/{id}       ProjectUpdate (partial)                   -> Project
 DELETE /projects/{id}                                                 -> 204
 
-POST   /documents           multipart: file, project_id?              -> {document_id, job_id}
+POST   /documents           multipart: file, project_id?, purpose?     -> {document_id, job_id}
                              -> validates magic bytes + size, stores file, creates
                                 extraction_job(status=queued), enqueues SAQ task, returns
-                                immediately (~100ms)
+                                immediately (~100ms). purpose=store_only (default
+                                project_extraction) skips the ExtractionJob — job_id is null —
+                                for the AI work-breakdown upload flow, which creates its own
+                                breakdown_job right after and doesn't want to also pay for a
+                                full field-extraction call it has no use for.
 
 GET    /extraction-jobs/{id}                                          -> JobStatus
                              { status, stage, result?: ExtractionResult, error?: {code, message} }
@@ -238,7 +294,7 @@ GET    /extraction-jobs/{id}                                          -> JobStat
 POST   /ai/rewrite          { op: enhance-long|generate-short|enhance-short,
                                section: description|responsibilities,
                                target: RichText, source: RichText,
-                               provider?: gemini|ollama }              -> RichText
+                               provider?: gemini|openai }              -> RichText
                              -- stateless single-field call, synchronous (few seconds,
                                 small prompt) so no job/poll needed here unlike extraction
 
@@ -276,6 +332,47 @@ DELETE /profile/photo                                                   -> 204
 GET    /suggestions/github                                              -> [RepoSuggestionOut]
                              -- this user's current non-dismissed proactive suggestions
 POST   /suggestions/github/{id}/dismiss                                 -> RepoSuggestionOut
+
+GET    /projects/{id}/tasks  ?q=&status=&priority=&due_before=&due_after=&include_subtasks=
+                              &sort=board|position|due_date|priority&order=&page=&page_size=
+                                                                         -> {items: [TaskSummary], total}
+                             -- sort=board (default) + page_size=100 returns the whole board
+                                pre-grouped by status in one request, no per-column fetch
+POST   /projects/{id}/tasks             TaskCreate                      -> TaskOut (201)
+POST   /projects/{id}/tasks/bulk        TaskBulkCreateRequest           -> {items, created} (201)
+                             -- all-or-nothing; one level of nested subtasks; `source` sits on
+                                the request envelope (manual|ai), not per item
+POST   /projects/{id}/tasks/reorder     {status, parent_id?, task_ids: [...]}
+                                                                         -> {items, total}
+                             -- the complete ordered id list for one column, never a "move to
+                                index N" delta — see §2's `position` note
+GET    /tasks   ?project_id=&... (same filters as above)                -> {items, total}
+GET    /tasks/{id}                                                      -> TaskOut (incl. subtask rollup)
+PATCH  /tasks/{id}          TaskUpdate (partial)                        -> TaskOut
+DELETE /tasks/{id}                                                      -> 204
+                             -- by-id routes are flat, NOT nested under /projects/{id}/tasks/{id}
+                                — a handler that only checks the project's ownership and loads
+                                the task by id, without also checking task.project_id, is a
+                                working IDOR that reviews right past you (core.ownership.require_owned
+                                is what actually scopes every one of these)
+
+POST   /projects/{id}/breakdowns    {document_id?, prompt?, provider?, max_tasks?}
+                                                                         -> {id} (201)
+                             -- at least one of document_id/prompt required; enqueues a
+                                breakdown_job the same way /documents enqueues an extraction_job
+GET    /breakdown-jobs/{id}                                             -> BreakdownJobOut
+                             { status, result?: {tasks[], confidence_notes[]},
+                               accepted: {ref: task_id}, dismissed_refs: [ref], is_scanned, error? }
+POST   /breakdown-jobs/{id}/cancel                                      -> BreakdownJobOut
+POST   /breakdown-jobs/{id}/accept  {items: [{ref, title, description, priority,
+                                     estimate_minutes?, estimate_size?, parent_ref?}], dry_run?}
+                                                                         -> {created: [TaskOut],
+                                                                             skipped: [{ref, reason}],
+                                                                             promoted_refs: [ref]}
+                             -- never optimistic on the frontend; accepted refs are idempotent
+                                (a duplicate ref is skipped, not re-created) so a double-submit
+                                or a refresh mid-accept can't create duplicate tasks
+POST   /breakdown-jobs/{id}/dismiss  {refs: [ref]}                      -> BreakdownJobOut
 ```
 
 `POST /documents` returning immediately with a job id (rather than blocking on
@@ -285,25 +382,24 @@ extraction) is the one endpoint whose behavior most shapes the frontend — see 
 ## 4. AI provider abstraction
 
 **Providers are orchestrated through LangChain** (`langchain-google-genai` /
-`langchain-ollama`) rather than calling `google-genai`/`ollama` directly. This keeps the
-provider layer composable with LCEL chains, tracing, and — per the planned chatbot
-feature — the same `ChatGoogleGenerativeAI`/`ChatOllama` instances can be reused for a
-conversational agent (memory, tool calling, retrieval over a user's saved projects)
-without a second integration layer. Two things are still done by hand rather than via
-LangChain's higher-level helpers, deliberately:
+`langchain-openai`) rather than calling `google-genai`/`openai` directly. This keeps the
+provider layer composable with LCEL chains, tracing, and lets the chatbot feature reuse
+the same `ChatGoogleGenerativeAI`/`ChatOpenAI` instances for a conversational agent
+(memory, tool calling, retrieval over a user's saved projects) without a second
+integration layer. Two things are still done by hand rather than via LangChain's
+higher-level helpers, deliberately:
 
 - **Structured output is bound directly** (Gemini's `response_mime_type`/
-  `response_json_schema`, Ollama's native `format`) instead of using
-  `.with_structured_output()`. For Ollama specifically there's a documented, currently
-  open issue where `with_structured_output` is not honoured in some versions while the
-  raw `format` parameter always works (`langchain-ai/langchain#29410`) — binding it
-  ourselves sidesteps that entirely.
-- **Safety checks read `response_metadata` explicitly** — `finish_reason` for Gemini's
-  MAX_TOKENS truncation, `prompt_eval_count` for Ollama's context truncation — since
-  those are exactly the silent-failure modes docs/RESEARCH.md §A3/§B6 verified against
-  the raw APIs, and LangChain's abstraction shouldn't be trusted to surface them by
-  default. **The `response_metadata` key names should be spot-checked against whatever
-  `langchain-google-genai`/`langchain-ollama` versions actually get installed** — this is
+  `response_json_schema`, OpenAI's `response_format` json_schema) instead of using
+  `.with_structured_output()`, to keep the exact request shape explicit and stable across
+  `langchain-google-genai`/`langchain-openai` versions rather than depending on that
+  method's internal method selection.
+- **Safety checks read `response_metadata` explicitly** — `finish_reason` for both
+  Gemini's `MAX_TOKENS` and OpenAI's `length` truncation signal — since those are exactly
+  the silent-failure modes docs/RESEARCH.md §A3 verified against the raw Gemini API, and
+  LangChain's abstraction shouldn't be trusted to surface them by default. **The
+  `response_metadata` key names should be spot-checked against whatever
+  `langchain-google-genai`/`langchain-openai` versions actually get installed** — this is
   the one seam in the backend that wasn't verified against a live call, only against
   each package's documented behavior at design time.
 
@@ -369,11 +465,11 @@ frames the call — see "Prompt design" below.
 
 `registry.py` resolves `LLMProvider` for a request: load the user's
 `ai_provider_settings` row for the requested (or default) provider, decrypt the API key
-via `core.security.decrypt()`, and construct `GeminiProvider`/`OllamaProvider`. Providers
+via `core.security.decrypt()`, and construct `GeminiProvider`/`OpenAIProvider`. Providers
 are cheap to construct (no persistent connection) so they're built per-call, not cached.
-`get_provider(..., purpose: Literal["extract","rewrite","chat"])` — `"chat"` behaves like
-`"rewrite"` for Ollama's cloud-tag handling (chat has no structured-output restriction, so
-an Ollama Cloud model is fine for it even though it's rejected for extraction, §Ollama below).
+`get_provider(..., purpose: Literal["extract","rewrite","chat"])` — `purpose` doesn't
+currently change construction for either provider; it exists so a future purpose-specific
+nuance (e.g. a different default model for chat) doesn't require touching every call site.
 
 ### Gemini (`providers/gemini.py`)
 
@@ -401,46 +497,28 @@ an Ollama Cloud model is fine for it even though it's rejected for extraction, �
   unrestricted "standard" key — those are rejected outright from **September 2026**
   (RESEARCH.md §A6). Don't skip this; it will hit real users during initial rollout.
 
-### Ollama (`providers/ollama.py`)
+### OpenAI (`providers/openai.py`)
 
-- **Local only.** Ollama Cloud does not support structured outputs
-  (RESEARCH.md §B3) — no cloud code path for extraction, ever, even though the schema
-  has room for a `base_url`/cloud key. If a user points `base_url` at
-  `ollama.com/api`, `test_connection` should still work (cloud chat works fine) but the
-  provider should refuse `extract()` with a clear `"Ollama Cloud doesn't support
-  structured output — use a local model for extraction"` error rather than silently
-  producing garbage.
-- Structured output via the native `ollama` Python client's `format=<json schema>`
-  (**never** the OpenAI-compatible `/v1` shim — it has no way to set `num_ctx` at all,
-  RESEARCH.md §B6). Inline the schema (no `$ref`/`$defs` — Pydantic's default nested-model
-  output needs flattening first; Ollama has real history of `$ref`-ordering bugs).
-- **`num_ctx` must be set explicitly on every call.** Default is 4096 tokens and Ollama
-  truncates server-side with a normal 200 response — no exception, no warning in the
-  payload. Estimate tokens from the document, cap against the model's real context length
-  (`POST /api/show`), and **verify `prompt_eval_count` after the call** — if it's
-  suspiciously close to `num_ctx`, raise `TruncationError` rather than trusting the result:
-
-  ```python
-  info = await client.show(model)
-  model_ctx = info.model_info.get(f"{arch}.context_length", 8192)
-  est_tokens = len(text) // 3 + 1500
-  num_ctx = min(max(8192, next_pow2(est_tokens)), model_ctx, 32768)
-  resp = await client.chat(model=model, messages=[...],
-                            format=schema, options={"num_ctx": num_ctx,
-                                                     "num_predict": 8192,
-                                                     "temperature": 0})
-  if resp["prompt_eval_count"] < est_tokens * 0.85:
-      raise TruncationError(f"only {resp['prompt_eval_count']} of ~{est_tokens} tokens processed")
-  ```
-- Also paste the JSON schema into the prompt text itself (belt-and-braces — Ollama's own
-  docs recommend this for small models) and set `num_predict` to stop runaway/repeating
-  generation, a documented failure mode on weak models.
-- `test_connection()` = `GET /api/version` (liveness) + `GET /api/tags` (populate the
-  model dropdown from what's actually installed — never hardcode).
-- **Set expectations in the UI**: local models will visibly underperform Gemini on
-  scanned PDFs (no OCR path), multi-column layouts, and long documents. Position it as
-  the privacy/offline option, default the user to Gemini, and always route local-model
-  output through the human review step in the form (never auto-save without review).
+- Structured output via `response_format={"type": "json_schema", "json_schema": {...}}`,
+  bound with `.bind()` rather than passed as a constructor kwarg (`ChatOpenAI` doesn't
+  declare `response_format` as a first-class field). `strict` is left off: OpenAI's
+  strict mode requires every property to appear in the schema's `required` array, but the
+  Pydantic models behind `extract()`'s schemas use field defaults (`schemas/job.py`'s
+  `LLMExtractedProject`), which Pydantic omits from `required` — non-strict mode matches
+  the guarantee level Gemini's `response_schema` already provided instead of reshaping
+  the schema just to satisfy strict mode.
+- **PDFs go straight to OpenAI too** — a langchain-core standard multimodal content block
+  (`{"type": "file", "source_type": "base64", "mime_type": "application/pdf", ...}`), same
+  `raw_bytes`-first / `extracted_text`-fallback pattern as Gemini's adapter.
+- **Always check `finish_reason == "length"` explicitly** — OpenAI's equivalent of
+  Gemini's `MAX_TOKENS`: hitting the output token cap returns truncated content with no
+  exception, so this must be checked the same way as the Gemini truncation check above.
+- Errors: `openai.RateLimitError` (429), `openai.AuthenticationError`/
+  `PermissionDeniedError` (401/403), `openai.APIConnectionError` (network), and
+  `openai.APIStatusError` for everything else (5xx → retryable, other 4xx → not) — see
+  `OpenAIProvider._classify_error()`.
+- `test_connection()` calls `client.models.list()` — same cheap, zero-token probe pattern
+  as Gemini's.
 
 ### Prompt design ("as human as possible")
 
@@ -536,11 +614,11 @@ OLE2_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"  # legacy .doc — reject with 
 (LibreOffice headless is the only thing that actually converts `.doc` on Windows and it's
 a 700MB dependency for a 19-year-obsolete format).
 
-`extract()` returns `{raw_bytes, mime_type, extracted_text, page_count, is_scanned}`. The
-scanned-PDF check (`is_scanned = total_extracted_chars < 100`) matters even though Gemini
-gets the raw PDF directly: it drives the pre-flight decision for the **Ollama** path
-(which has no OCR and must fail fast with `NO_TEXT_FOUND` rather than silently extracting
-nothing) and for offline/local-only mode.
+`extract()` returns `{raw_bytes, mime_type, extracted_text, page_count, is_scanned}`. Both
+current providers (Gemini, OpenAI) accept `raw_bytes` directly for PDFs, so the
+scanned-PDF check (`is_scanned = total_extracted_chars < 100`) is no longer load-bearing
+for provider selection — it's kept as a signal for surfacing a "this looks like a scan"
+hint in the UI, and as a fast `NO_TEXT_FOUND` path for any future text-only provider.
 
 ## 6. Job queue
 
@@ -555,7 +633,8 @@ no WSL2, just the Postgres you already have.
 # app/workers/settings.py
 from saq import CronJob, Queue
 from app.workers.tasks import (
-    compact_history, generate_session_title, recompute_user_suggestions, run_extraction_job,
+    compact_history, generate_session_title, recompute_user_suggestions,
+    run_breakdown_job, run_extraction_job,
 )
 from app.workers.stale_jobs import reap_stale_jobs
 from app.workers.suggestion_refresh import refresh_stale_suggestions
@@ -564,16 +643,31 @@ queue = Queue.from_url(_to_saq_url(settings.database_url))  # postgres:// DSN, n
 
 settings = {
     "queue": queue,
-    "functions": [run_extraction_job, generate_session_title, compact_history, recompute_user_suggestions],
+    "functions": [
+        run_extraction_job, run_breakdown_job,
+        generate_session_title, compact_history, recompute_user_suggestions,
+    ],
     "concurrency": 4,
     "cron_jobs": [
-        CronJob(reap_stale_jobs, cron="*/5 * * * *"),
+        CronJob(reap_stale_jobs, cron="*/5 * * * *"),  # sweeps BOTH extraction_jobs and
+                                       # breakdown_jobs in the same tick — one crashed-worker
+                                       # story, not two separate reapers
         CronJob(refresh_stale_suggestions, cron="*/20 * * * *"),  # makes real outbound
                                        # GitHub calls, so a longer interval than the
                                        # pure-DB-sweep reaper above — see plan.md Part H
     ],
 }
 ```
+
+`run_breakdown_job` (services/breakdown_service.py) mirrors `run_extraction_job`'s shape
+exactly — same queued→parsing→extracting→structuring→succeeded/failed state machine, same
+`timeout=600`/`key=str(job_id)` enqueue pattern via the bridge thread, same
+`except Exception` catch-all mapping to `UNEXPECTED_ERROR` — with one extra step before
+`succeeded`: the raw provider JSON is passed through `normalize_breakdown()`, which
+**repairs rather than rejects** anything malformed (an unknown `parent_ref`, a duplicate
+`ref`, a 3+ level parent chain, an over-length title, a `grounded=true` task with no
+quote, more tasks than the cap) and records what it fixed as a `confidence_note`, so a job
+essentially never fails just because the model's JSON had one bad field.
 
 ```python
 # app/workers/tasks.py — thin wrappers; all real logic lives in the corresponding
@@ -660,14 +754,12 @@ interfaces so the choice is swappable per-deployment:
   corrupt *values* inside the schema, but can't escape into arbitrary tool calls or
   change what fields exist, since there's no agentic tool use here at all. This is why
   the human-review step in the UI is load-bearing, not optional polish.
-- **SSRF via user-supplied Ollama `base_url`**: the settings endpoint accepts a base URL
-  the user controls, which the backend then makes server-side requests to — a classic
-  SSRF vector if a malicious user (in a multi-tenant deployment) points it at
-  `http://169.254.169.254` or an internal service. Mitigate: for non-local deployments,
-  validate/allowlist the host (permit `localhost`/`127.0.0.1`/private RFC1918 ranges only
-  if the deployment is explicitly single-tenant/self-hosted; otherwise resolve and reject
-  link-local/metadata and other internal ranges), short connect/read timeouts, and no
-  following of redirects to a different host.
+- **SSRF via a user-supplied provider `base_url`** was a live concern back when Ollama was
+  supported (the backend made server-side requests to a URL the user controlled) — neither
+  current provider (Gemini, OpenAI) uses `base_url`, so this vector is closed today. Keep
+  this in mind if a future provider reintroduces a user-controlled endpoint: validate/
+  allowlist the host, short connect/read timeouts, no following of redirects to a
+  different host.
 
 ## 9. Milestones
 
@@ -688,9 +780,15 @@ interfaces so the choice is swappable per-deployment:
 | **M12** *(delivered)* | Optional CV-style Profile page: `user_profiles` table, photo upload, 5 AI-enhanced bio fields, `build_context_digest()` feeding Jarvis as soft (never verified-fact) context | Fill in a distinctive speciality, ask Jarvis an open-ended recommendation question with no other context → suggestions lean toward it, but Jarvis never states it back as fact. `plan.md` Part E |
 | **M13** *(delivered)* | Conversation management: session starring/search/sort, auto-generated titles, background history compaction (`context_summary`) so long conversations stay within context limits | Cross the compaction threshold mid-conversation → later replies still reference facts from the compacted-away turns; delete/star/search sessions via `/chat/sessions`. `plan.md` Part G |
 | **M14** *(delivered)* | Proactive GitHub repo suggestions: background job computes top technologies per user and surfaces real repos independent of any chat turn, sharing a no-repeat guarantee with `github_search` | Edit a project's technologies with the toggle on → a suggestion appears without opening chat; dismiss it → never resurfaces; ask Jarvis about the same technology → no duplicate suggestion either direction. `plan.md` Part H |
+| **M15** *(delivered)* | Task foundation: `tasks` table (parent/child, depth capped at 1), `core/ownership.py`'s shared `require_owned`/`owned` seam adopted repo-wide, full CRUD + bulk-create + reorder, first backend test suite (17 tests) | curl create/list/reorder/bulk; cross-user access 404s; a rejected reorder leaves `position` unchanged. `new-feature.md` Feature 1 |
+| **M16** *(delivered)* | AI work breakdown (flagship): `breakdown_jobs` table sharing `extraction_jobs`' `job_status` type, persona-keyed prompts with a per-item verbatim-quote grounding contract, `normalize_breakdown()` (repairs rather than rejects any malformed model output), review-and-accept UI with idempotent partial-accept and a promotion-warning for orphaned subtasks | Upload a spec → propose a task tree → edit and accept a subset → tasks appear with an AI badge; double-submit accept creates nothing extra; cancel/dismiss work; a stale job is reaped. 32 new tests. `new-feature.md` Feature 2 |
+| **M17** *(delivered)* | Jarvis becomes work-aware: `task_search`/`task_summary` tools (read-only, same `user_id`-closure pattern as the existing three) | Ask Jarvis "what's blocked on X" or "what's my workload" and get a tool-grounded answer citing real tasks. `new-feature.md` Feature 3 |
 
 M0–M2 sequential. M3 can run in parallel with M4. M5 must precede M6/M7. M8 is independent
 of M6/M7 (it only needs a provider, not the job queue) and can start once M3 is done.
 M11 needs M3 (a working provider) and M5 (the job queue, for M13/M14's background work) but
 not M6–M10. M12 depends only on M8's rewrite machinery. M13/M14 both extend M11 and were
-built after it, once real usage surfaced the need for them.
+built after it, once real usage surfaced the need for them. M15 is independent of M6–M14
+(tasks have no AI surface of their own). M16 depends on M15 (it creates `Task` rows) and
+reuses M5's job-queue infrastructure and M6's provider abstraction; M17 depends on M15 and
+M11 (it adds tools to Jarvis's existing tool-calling loop).

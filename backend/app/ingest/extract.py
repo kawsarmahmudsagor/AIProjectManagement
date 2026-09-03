@@ -9,14 +9,22 @@ thing that actually converts it on Windows and a 700MB dependency isn't worth it
 """
 
 import io
+import zipfile
 from dataclasses import dataclass
 
 import pdfplumber
 from docx2python import docx2python
 
 PDF_MAGIC = b"%PDF"
-ZIP_MAGIC = b"PK\x03\x04"  # .docx is a zip container
+ZIP_MAGIC = b"PK\x03\x04"  # .docx/.xlsx are both zip containers
 OLE2_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"  # legacy .doc / .xls / .ppt
+
+DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+# Recognized by sniff_mime_type (below) but deliberately NOT handled by ingest(): the
+# brag-document feature (services/standup_excel_service.py) reads .xlsx bytes directly
+# with openpyxl via its own dedicated preview endpoint, bypassing this PDF/DOCX/TXT-shaped
+# pipeline entirely — see that module's docstring and backend/DESIGN.md's ingest overview.
+XLSX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 _SCANNED_PDF_CHAR_THRESHOLD = 100
 
@@ -42,7 +50,18 @@ def sniff_mime_type(data: bytes, filename: str) -> str:
     if data.startswith(PDF_MAGIC):
         return "application/pdf"
     if data.startswith(ZIP_MAGIC):
-        return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        # Both .docx and .xlsx are OOXML zip containers with the same outer magic bytes —
+        # distinguish them by which internal part the zip actually contains, checked
+        # before falling back to the (pre-existing) docx default so that fallback's
+        # behavior for a genuine .docx, or any other zip shape, is completely unchanged.
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                names = zf.namelist()
+            if "xl/workbook.xml" in names and "word/document.xml" not in names:
+                return XLSX_MIME_TYPE
+        except zipfile.BadZipFile:
+            pass
+        return DOCX_MIME_TYPE
     if data.startswith(OLE2_MAGIC):
         raise UnsupportedFormatError(
             "legacy_format_unsupported",
@@ -105,6 +124,17 @@ def ingest(data: bytes, filename: str) -> IngestResult:
             page_count=None,
             is_scanned=False,
             filename=filename,
+        )
+
+    if mime_type == XLSX_MIME_TYPE:
+        # This pipeline is PDF/DOCX/TXT-shaped only — a spreadsheet has no use for an
+        # IngestResult and would otherwise fall through to the text/plain branch below and
+        # fail with a raw UnicodeDecodeError on its binary zip content. The brag-document
+        # feature never calls ingest() on an .xlsx file (see standup_excel_service.py); this
+        # only guards a caller that reaches this function directly.
+        raise UnsupportedFormatError(
+            "xlsx_not_supported_here",
+            f"{filename} is a spreadsheet — upload it from the Brag Document page instead.",
         )
 
     # text/plain

@@ -14,7 +14,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.ingest.extract import UnsupportedFormatError, sniff_mime_type
+from app.ingest.extract import XLSX_MIME_TYPE, UnsupportedFormatError, sniff_mime_type
 from app.models.document import Document
 
 
@@ -41,6 +41,7 @@ async def save_upload(
         "application/pdf": ".pdf",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
         "text/plain": ".txt",
+        XLSX_MIME_TYPE: ".xlsx",
     }.get(mime_type, "")
 
     stored_name = f"{uuid.uuid4()}{ext}"

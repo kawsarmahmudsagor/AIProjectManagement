@@ -179,6 +179,56 @@ data = Extraction.model_validate_json(resp.text)
 4. **`$ref` ordering bugs** existed in Ollama and historically in Gemini; safest is Pydantic with `model_json_schema(ref_template=...)` inlined, or just avoid reusing sub-models where you can.
 5. **Syntactically valid ≠ semantically correct.** Docs explicitly warn output "requires application-level semantic validation." Always `model_validate_json` and treat `ValidationError` as a retry-once-then-fail.
 
+### A3.1 `langchain-google-genai` normalizes `response_schema` to `response_json_schema` — verified from installed source (Sept 2026)
+
+The plan for the AI work-breakdown feature (`new-feature.md`) flagged this repo's use of
+the legacy `response_schema=` kwarg (`providers/gemini.py`) as the single biggest risk for
+a breakdown schema that adds `enum`, `maxItems`, and an array of objects on top of
+extraction's flat 9-field shape — the concern being that `response_schema`'s "legacy"
+coercion path (§A3 above: takes a `types.Schema` object or a Pydantic class) might reject
+or mishandle keywords the raw-dict `response_json_schema` path accepts fine. The plan
+called for a live-API "Step 0" probe to settle it before writing the breakdown schema.
+
+No live Gemini API key was available in the environment where that feature was built, so
+this was resolved by reading the installed `langchain-google-genai` package source
+directly instead (`_add_response_parameters()` / `_validate_and_add_response_schema()` in
+`chat_models.py`):
+
+```python
+# langchain_google_genai/chat_models.py (paraphrased, verified against the installed version)
+def _add_response_parameters(self, gen_config, **kwargs):
+    response_schema = kwargs.get("response_schema", self.response_schema)
+    response_json_schema = kwargs.get("response_json_schema")
+    schema_to_use = response_json_schema if response_json_schema is not None else response_schema
+    if schema_to_use:
+        self._validate_and_add_response_schema(gen_config, response_schema=schema_to_use, ...)
+
+def _validate_and_add_response_schema(self, gen_config, response_schema, response_mime_type):
+    ...
+    gen_config["response_json_schema"] = response_schema  # <-- always this field on the wire
+```
+
+Whichever kwarg you pass in — `response_schema=` or `response_json_schema=` — this
+installed version routes the raw dict straight onto `response_json_schema` in the actual
+`google.genai.types.GenerationConfig` sent over the wire, with **no intermediate
+`types.Schema` coercion and no keyword stripping**. There is no "legacy path" distinct
+from the raw-dict path at this integration layer — both kwargs are just two names for the
+same destination field. This substantially de-risks passing a richer schema (enum,
+maxItems, nested objects) through the existing `response_schema=` call site: the wire
+request Gemini's API actually receives is identical either way.
+
+**What this does and doesn't prove**: it proves the *LangChain adapter* introduces no
+extra restriction. It does *not* prove Gemini's API itself accepts every keyword in
+§A3's "supported schema surface" table for a `response_json_schema` call the same way it
+would for `response_schema` — that's still a live-API question, and §A3's own "NOT
+supported / risky" list ("test yours") still applies. Also: `langchain-google-genai` is a
+third-party package that gets upgraded independently of this repo; re-verify this against
+whatever version is actually installed before trusting it blindly (same discipline
+`agents/chatbot_graph.py`'s docstring already asks for on the `astream_events` shape).
+**Action item still open**: run a real breakdown call against live Gemini and OpenAI keys
+once available, per the original Step 0 plan, as a confirming smoke test — this finding
+is strong enough to build on, not a substitute for that test.
+
 ## A4. PDFs directly to Gemini — **yes, and you should**
 
 From [document-processing docs](https://ai.google.dev/gemini-api/docs/document-processing):
