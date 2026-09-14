@@ -22,6 +22,34 @@ class Settings(BaseSettings):
     data_dir: Path = Path("./data")
     max_upload_size_mb: int = 25
 
+    # Project media (models/project_media.py) is stored as Postgres bytea, not on disk,
+    # so every one of these caps is also a per-request memory cap in *this* process: the
+    # bytes are held once by the request handler and again while asyncpg encodes the
+    # bytea parameter. max_upload_size_mb (25) governs documents only.
+    max_thumbnail_size_mb: int = 5  # matches the profile-photo cap
+    max_video_size_mb: int = 50
+    max_chat_image_size_mb: int = 5
+    # Range-response / full-body streaming chunk for video. Every chunk is one
+    # `substring(data from N for L)` round-trip, so this trades round-trips against peak
+    # memory; 1 MiB is ~50 queries for a max-size video.
+    media_stream_chunk_bytes: int = 1024 * 1024
+    # Max concurrent video uploads across the process — the one hard backstop against
+    # N * max_video_size_mb resident at once.
+    max_concurrent_video_uploads: int = 2
+
+    # Video-frame carousel (services/video_frame_service.py) — how many stills to pull
+    # from a project's uploaded video, and how they're encoded. Starting points, not
+    # measured; adjust after seeing the carousel rendered.
+    video_frame_count: int = 6
+    video_frame_max_dimension_px: int = 640
+    video_frame_jpeg_quality: int = 78
+
+    # Text-to-image model for AI project thumbnails (providers/gemini.generate_image).
+    # Set to "" to hard-disable the raster path so every generation takes the
+    # deterministic SVG-poster route (services/poster_renderer.py) — that's the switch to
+    # flip if this model id turns out not to be enabled for an account's tier.
+    gemini_image_model: str = "imagen-4.0-generate-001"
+
     saq_concurrency: int = 4
 
     openai_default_model: str = "gpt-4.1-mini"

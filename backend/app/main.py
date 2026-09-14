@@ -14,13 +14,17 @@ from app.routers import (
     brag_documents,
     breakdown,
     chat,
+    dashboard,
     documents,
     export,
     jobs,
     profile,
+    project_media,
     projects,
+    search,
     suggestions,
     tasks,
+    thumbnails,
 )
 from app.services.task_service import TaskValidationError
 from app.workers import bridge, worker_process
@@ -99,6 +103,11 @@ app.include_router(breakdown.router, prefix="/api/v1")
 app.include_router(breakdown.breakdown_jobs_router, prefix="/api/v1")
 app.include_router(brag_documents.router, prefix="/api/v1")
 app.include_router(brag_documents.brag_document_jobs_router, prefix="/api/v1")
+app.include_router(project_media.router, prefix="/api/v1")
+app.include_router(thumbnails.router, prefix="/api/v1")
+app.include_router(thumbnails.thumbnail_jobs_router, prefix="/api/v1")
+app.include_router(search.router, prefix="/api/v1")
+app.include_router(dashboard.router, prefix="/api/v1")
 
 
 @app.get("/healthz", tags=["meta"])

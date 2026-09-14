@@ -14,6 +14,9 @@ from app.core.database import async_session_factory
 from app.models.brag_document_job import BragDocumentJob
 from app.models.breakdown_job import BreakdownJob
 from app.models.extraction_job import ExtractionJob, JobStatus
+from app.models.faq_job import FAQJob
+from app.models.thumbnail_job import ThumbnailJob
+from app.models.video_frame_job import VideoFrameJob
 
 _STALE_AFTER = timedelta(minutes=10)
 _NON_TERMINAL = (JobStatus.QUEUED, JobStatus.PARSING, JobStatus.EXTRACTING, JobStatus.STRUCTURING)
@@ -37,5 +40,8 @@ async def reap_stale_jobs(ctx) -> None:
         reaped = await _reap(db, ExtractionJob, cutoff)
         reaped += await _reap(db, BreakdownJob, cutoff)
         reaped += await _reap(db, BragDocumentJob, cutoff)
+        reaped += await _reap(db, ThumbnailJob, cutoff)
+        reaped += await _reap(db, FAQJob, cutoff)
+        reaped += await _reap(db, VideoFrameJob, cutoff)
         if reaped:
             await db.commit()

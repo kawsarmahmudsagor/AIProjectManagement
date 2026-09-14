@@ -1,14 +1,45 @@
-import { Sparkles } from "lucide-react";
+import { File, Sparkles } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { RepoSuggestionCard } from "@/components/chat/repo-suggestion-card";
+import { formatBytes } from "@/lib/chat-attachments";
 import type { ChatMessage, RepoSuggestion } from "@/lib/chat";
+import { mediaUrl } from "@/lib/media-url";
+import type { ChatAttachment } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-function UserBubble({ content }: { content: string }) {
+function UserBubble({ content, attachments }: { content: string; attachments: ChatAttachment[] }) {
+  const images = attachments.filter((a) => a.kind === "image");
+  const documents = attachments.filter((a) => a.kind === "document");
+
   return (
-    <div className="ml-auto max-w-[85%] rounded-lg rounded-tr-sm bg-accent px-3 py-2 text-sm text-accent-foreground">
-      {content}
+    <div className="ml-auto max-w-[85%] space-y-2">
+      {(images.length > 0 || documents.length > 0) && (
+        <div className="ml-auto flex max-w-full flex-wrap justify-end gap-2">
+          {images.map((a) => (
+            <a key={a.id} href={mediaUrl(a.url)} target="_blank" rel="noreferrer">
+              {/* eslint-disable-next-line @next/next/no-img-element -- user-uploaded, served from our own API */}
+              <img src={mediaUrl(a.url)} alt={a.filename} className="h-20 w-20 rounded-md object-cover" />
+            </a>
+          ))}
+          {documents.map((a) => (
+            <a
+              key={a.id}
+              href={mediaUrl(a.url)}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-2 rounded-lg border border-border bg-surface-2 px-2.5 py-1.5 text-xs hover:bg-surface-3"
+            >
+              <File size={14} className="shrink-0 text-muted" />
+              <span className="max-w-[140px] truncate">{a.filename}</span>
+              <span className="shrink-0 text-muted">{formatBytes(a.size_bytes)}</span>
+            </a>
+          ))}
+        </div>
+      )}
+      {content && (
+        <div className="rounded-lg rounded-tr-sm bg-accent px-3 py-2 text-sm text-accent-foreground">{content}</div>
+      )}
     </div>
   );
 }
@@ -57,7 +88,7 @@ function extractRepos(message: ChatMessage): RepoSuggestion[] {
 /** One persisted ChatMessage row. Callers should already have filtered out rows this
  * component has nothing to show for (see chat-message-list.tsx's `isRenderable`). */
 export function ChatMessageBubble({ message }: { message: ChatMessage }) {
-  if (message.role === "user") return <UserBubble content={message.content} />;
+  if (message.role === "user") return <UserBubble content={message.content} attachments={message.attachments} />;
 
   if (message.role === "assistant") return <AssistantBubble content={message.content} />;
 
@@ -69,7 +100,8 @@ export function ChatMessageBubble({ message }: { message: ChatMessage }) {
 /** Whether a persisted row has anything to render at all — an assistant row that only
  * made tool calls has empty content (nothing to show; the tool_start/tool_end indicator
  * already covered it live, and isn't replayed on reload), and a tool row is only shown
- * when it's a github_search result with repos. */
+ * when it's a github_search result with repos. A user row is always renderable, even
+ * with empty text, once attachments exist (an attachment-only message). */
 export function isRenderable(message: ChatMessage): boolean {
   if (message.role === "user") return true;
   if (message.role === "assistant") return message.content.trim().length > 0;

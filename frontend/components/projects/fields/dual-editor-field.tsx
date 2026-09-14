@@ -3,11 +3,12 @@
 import { useEffect, useRef, useState } from "react";
 import { useWatch, type Control, type FieldPath, type FieldValues, type UseFormGetValues, type UseFormSetValue } from "react-hook-form";
 import { RichTextField } from "@/components/editor/rich-text-field";
-import type { AiGlowState } from "@/components/editor/rich-text-editor";
+import type { AiGlowState } from "@/lib/ai-glow";
 import type { ToolbarAiAction } from "@/components/editor/editor-toolbar";
 import { AiEnhanceContextDialog } from "@/components/projects/ai/ai-enhance-context-dialog";
 import { AiSuggestionPanel } from "@/components/projects/ai/ai-suggestion-panel";
 import { Badge } from "@/components/ui/card";
+import { useAppliedPulse } from "@/hooks/use-applied-pulse";
 import { useFieldSuggestion } from "@/hooks/use-field-suggestion";
 import type { AiEnhanceOp, AiRewriteContext, ProjectSectionKey } from "@/lib/ai";
 import { EMPTY_RICH_TEXT, type RichText } from "@/lib/rich-text/types";
@@ -45,25 +46,6 @@ export interface DualEditorFieldProps<TFieldValues extends FieldValues> {
    * accept path. The caller is responsible for deciding *which* fields are safe to
    * overwrite (e.g. skipping ones the user already edited) before setting this. */
   autofill?: { token: number; long?: RichText; short?: RichText };
-}
-
-/** How long the "applied" glow pulse plays after an AI suggestion is accepted into a
- * box — long enough to notice, short enough to not linger and read as "still AI's". */
-const APPLIED_GLOW_MS = 1600;
-
-function useAppliedPulse(): [boolean, () => void] {
-  const [applied, setApplied] = useState(false);
-  const timeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-
-  useEffect(() => () => clearTimeout(timeoutRef.current), []);
-
-  const trigger = () => {
-    setApplied(true);
-    clearTimeout(timeoutRef.current);
-    timeoutRef.current = setTimeout(() => setApplied(false), APPLIED_GLOW_MS);
-  };
-
-  return [applied, trigger];
 }
 
 export function DualEditorField<TFieldValues extends FieldValues>({

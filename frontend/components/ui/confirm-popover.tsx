@@ -1,8 +1,8 @@
 "use client";
 
 import { AlertTriangle } from "lucide-react";
-import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { useEnterTransition } from "@/hooks/use-enter-transition";
 import { cn } from "@/lib/utils";
 
 /** Anchored confirmation popover — rendered inline next to its trigger (not a portal),
@@ -29,21 +29,7 @@ export function ConfirmPopover({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
-  const [visible, setVisible] = useState(false);
-
-  // Reset the entrance transition for next time this opens (render-phase state
-  // adjustment, not an effect — see react.dev/learn/you-might-not-need-an-effect).
-  const [prevOpen, setPrevOpen] = useState(open);
-  if (prevOpen !== open) {
-    setPrevOpen(open);
-    if (!open) setVisible(false);
-  }
-
-  useEffect(() => {
-    if (!open) return;
-    const raf = requestAnimationFrame(() => setVisible(true));
-    return () => cancelAnimationFrame(raf);
-  }, [open]);
+  const visible = useEnterTransition(open);
 
   if (!open) return null;
 

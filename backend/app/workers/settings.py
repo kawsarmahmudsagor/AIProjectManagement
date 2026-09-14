@@ -29,6 +29,9 @@ from app.workers.tasks import (
     run_brag_document_job,
     run_breakdown_job,
     run_extraction_job,
+    run_faq_job,
+    run_thumbnail_job,
+    run_video_frame_job,
 )
 
 if sys.platform == "win32":
@@ -89,6 +92,33 @@ async def enqueue_brag_document(job_id: UUID) -> None:
     )
 
 
+async def enqueue_thumbnail(job_id: UUID) -> None:
+    # Same reasoning as enqueue_breakdown: bridge thread + timeout=600 (matches
+    # stale_jobs._STALE_AFTER) + key=str(job_id) so request_cancel/reap_stale_jobs can
+    # find this SAQ job by the same id as the ThumbnailJob row.
+    await bridge.run_async(
+        queue.enqueue("run_thumbnail_job", job_id=str(job_id), key=str(job_id), timeout=600)
+    )
+
+
+async def enqueue_faq_generation(job_id: UUID) -> None:
+    # Same reasoning as enqueue_thumbnail: bridge thread + timeout=600 (matches
+    # stale_jobs._STALE_AFTER) + key=str(job_id) so reap_stale_jobs can find this SAQ job
+    # by the same id as the FAQJob row. No cancel path exists for this job (no user-facing
+    # trigger to cancel from), unlike enqueue_extraction/enqueue_breakdown.
+    await bridge.run_async(
+        queue.enqueue("run_faq_job", job_id=str(job_id), key=str(job_id), timeout=600)
+    )
+
+
+async def enqueue_video_frame_extraction(job_id: UUID) -> None:
+    # Same reasoning as enqueue_faq_generation — fire-and-forget background
+    # post-processing with no user-facing status/cancel path.
+    await bridge.run_async(
+        queue.enqueue("run_video_frame_job", job_id=str(job_id), key=str(job_id), timeout=600)
+    )
+
+
 async def enqueue_generate_title(session_id: UUID) -> None:
     # No `key=` (unlike enqueue_extraction) — nothing needs to look this job up later,
     # and generate_session_title's own "still 'New chat'?" guard makes a duplicate
@@ -139,6 +169,9 @@ settings = {
         run_extraction_job,
         run_breakdown_job,
         run_brag_document_job,
+        run_thumbnail_job,
+        run_faq_job,
+        run_video_frame_job,
         generate_session_title,
         compact_history,
         recompute_user_suggestions,

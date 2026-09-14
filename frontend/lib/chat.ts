@@ -1,6 +1,6 @@
 import { apiFetch, buildBffHeaders, parseApiError } from "@/lib/api-client";
 import { parseSseStream } from "@/lib/sse";
-import type { ChatProvider } from "@/lib/types";
+import type { ChatAttachment, ChatProvider } from "@/lib/types";
 
 export type ChatRole = "user" | "assistant" | "tool";
 
@@ -25,6 +25,7 @@ export type ChatMessage = {
   tool_name: string | null;
   tool_result: { repos?: RepoSuggestion[]; error?: string } | Record<string, unknown> | null;
   created_at: string;
+  attachments: ChatAttachment[];
 };
 
 export type ChatSession = { id: string; title: string; last_message_at: string; starred: boolean };
@@ -113,9 +114,17 @@ export async function* streamChatTurn(args: {
   sessionId: string;
   content: string;
   provider?: ChatProvider;
+  attachmentIds?: string[];
   signal?: AbortSignal;
 }): AsyncGenerator<ChatStreamEvent> {
-  const init: RequestInit = { method: "POST", body: JSON.stringify({ content: args.content, provider: args.provider }) };
+  const init: RequestInit = {
+    method: "POST",
+    body: JSON.stringify({
+      content: args.content,
+      provider: args.provider,
+      attachment_ids: args.attachmentIds?.length ? args.attachmentIds : undefined,
+    }),
+  };
   const headers = buildBffHeaders("POST", init);
   const res = await fetch(`/api/bff/chat/sessions/${args.sessionId}/messages`, {
     ...init,

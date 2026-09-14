@@ -17,17 +17,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.rewrite_graph import run_rewrite
 from app.core.config import Settings, get_settings
+from app.ingest.media_sniff import UnsupportedMediaFormatError, sniff_image_mime_type
 from app.models.profile import UserProfile
 from app.models.user import User
 from app.providers.base import LLMProvider, ProviderError
 from app.providers.prompts import PROFILE_FIELD_OPS
 from app.providers.registry import get_provider
 
-_IMAGE_MAGIC = {
-    b"\xff\xd8\xff": "image/jpeg",
-    b"\x89PNG\r\n\x1a\n": "image/png",
-    # WEBP: "RIFF" .... "WEBP" — the 4-byte size field in between varies per file.
-}
 _MAX_PHOTO_BYTES = 5 * 1024 * 1024
 
 
@@ -40,12 +36,13 @@ class PhotoTooLargeError(Exception):
 
 
 def _sniff_image_mime_type(data: bytes) -> str:
-    for magic, mime in _IMAGE_MAGIC.items():
-        if data.startswith(magic):
-            return mime
-    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "image/webp"
-    raise UnsupportedPhotoFormatError("Only JPEG, PNG, or WEBP images are supported")
+    """Delegates to the shared sniffer (ingest/media_sniff.py) — now also used by
+    project media and chat attachments — kept as a thin wrapper so this module's own
+    exception type (and every existing caller in routers/profile.py) is unchanged."""
+    try:
+        return sniff_image_mime_type(data)
+    except UnsupportedMediaFormatError as exc:
+        raise UnsupportedPhotoFormatError("Only JPEG, PNG, or WEBP images are supported") from exc
 
 
 async def get_or_create_profile(db: AsyncSession, user_id: UUID) -> UserProfile:

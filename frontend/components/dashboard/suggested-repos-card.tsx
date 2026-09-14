@@ -4,6 +4,12 @@ import { useState } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { dismissGithubSuggestion, type GithubSuggestion } from "@/lib/suggestions";
+import { cn } from "@/lib/utils";
+
+// Roughly the height of 5 rows (each ~38px of two-line text, plus the 12px space-y-3
+// gap between them) — beyond that the list scrolls inside the card instead of pushing
+// the rest of the dashboard down.
+const VISIBLE_SUGGESTION_COUNT = 5;
 
 export function SuggestedReposCard({ initialSuggestions }: { initialSuggestions: GithubSuggestion[] }) {
   const [suggestions, setSuggestions] = useState(initialSuggestions);
@@ -30,7 +36,12 @@ export function SuggestedReposCard({ initialSuggestions }: { initialSuggestions:
           No suggestions yet — add technologies to your projects and check back soon.
         </p>
       ) : (
-        <ul className="mt-3 space-y-3">
+        <ul
+          className={cn(
+            "mt-3 space-y-3",
+            suggestions.length > VISIBLE_SUGGESTION_COUNT && "max-h-[260px] overflow-y-auto pr-1",
+          )}
+        >
           {suggestions.map((s) => (
             <li key={s.id} className="flex items-start justify-between gap-3 text-sm">
               <div className="min-w-0">

@@ -22,7 +22,13 @@ router = APIRouter(prefix="/profile", tags=["profile"])
 
 def _to_profile_out(user: User, profile) -> ProfileOut:
     return ProfileOut(
-        photo_url="/api/v1/profile/photo" if profile.photo_path else None,
+        # Bare API path, no "/api/v1" prefix — the frontend resolves it through the
+        # authenticated BFF proxy via lib/media-url.ts's mediaUrl(), the same convention
+        # every new media URL (project thumbnails/videos, chat attachments) follows. A
+        # "/api/v1/..." value here previously 404'd/401'd when handed straight to
+        # <img src>, since nothing on the Next side rewrites that prefix and the backend
+        # requires a Bearer token a bare <img> request never sends.
+        photo_url="profile/photo" if profile.photo_path else None,
         designation=profile.designation,
         team=profile.team,
         organization=profile.organization,
@@ -90,7 +96,7 @@ async def upload_photo(
         raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, str(exc)) from exc
     except PhotoTooLargeError as exc:
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, str(exc)) from exc
-    return PhotoUploadResponse(photo_url="/api/v1/profile/photo")
+    return PhotoUploadResponse(photo_url="profile/photo")
 
 
 @router.delete("/photo", status_code=status.HTTP_204_NO_CONTENT)

@@ -75,6 +75,7 @@ class ChatGraphEvent(TypedDict, total=False):
     name: str
     result: dict
     messages: list[BaseMessage]
+    usage: list[dict]  # only populated on the "final" event — see stream_chat below
 
 
 def _build_graph(tools: list[BaseTool]):
@@ -158,6 +159,10 @@ async def stream_chat(
     }
 
     collected: list[BaseMessage] = []
+    # One entry per agent-loop LLM call this turn (there can be several — see
+    # _MAX_AGENT_STEPS), each a LangChain UsageMetadata dict — chat_service.stream_turn
+    # logs one usage_service.record_usage row per entry once the turn finishes.
+    usage_events: list[dict] = []
 
     async for event in compiled.astream_events(initial_state, version="v2"):
         kind = event.get("event")
@@ -172,6 +177,8 @@ async def stream_chat(
             output = event.get("data", {}).get("output")
             if isinstance(output, AIMessage):
                 collected.append(output)
+                if output.usage_metadata:
+                    usage_events.append(dict(output.usage_metadata))
 
         elif kind == "on_tool_start":
             run_id = str(event.get("run_id", ""))
@@ -200,4 +207,4 @@ async def stream_chat(
                     result = {}
             yield {"type": "tool_end", "tool_call_id": run_id, "name": name, "result": result}
 
-    yield {"type": "final", "messages": collected}
+    yield {"type": "final", "messages": collected, "usage": usage_events}

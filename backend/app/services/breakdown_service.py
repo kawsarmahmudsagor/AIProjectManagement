@@ -265,7 +265,7 @@ async def run_breakdown_job(db: AsyncSession, job_id: UUID) -> None:
         await db.commit()
 
         try:
-            provider = await get_provider(db, job.user_id, job.provider, purpose="extract")
+            provider = await get_provider(db, job.user_id, job.provider, purpose="breakdown")
             user = await db.get(User, job.user_id)
             persona = user.agent_persona if user else AgentPersona.BUSINESS_ANALYST
             raw_result = await provider.propose_breakdown(

@@ -165,6 +165,117 @@ async def test_export_before_job_succeeded_is_409(db, user_a: User, brag_client_
     assert resp.status_code == 409
 
 
+_ORIGINAL_RESULT = {
+    "technical_contributions": [
+        {
+            "project_name": "Project X",
+            "bullets": ["Did a thing"],
+            "subsections": [],
+            "key_contribution": "Shipped a thing",
+        }
+    ],
+    "team_support_bullets": ["Helped onboard a new hire"],
+    "learning_bullets": ["Learned Rust"],
+    "overall_impact": [{"category": "MLOps", "summary": "Improved pipelines"}],
+    "confidence_notes": [],
+}
+
+
+def _edited_payload(**overrides):
+    payload = {**_ORIGINAL_RESULT, "team_support_bullets": []}
+    payload.update(overrides)
+    return payload
+
+
+def test_effective_result_prefers_edited_result_over_result() -> None:
+    job = BragDocumentJob(
+        user_id=None,  # not persisted in this test — pure property check
+        document_id=None,
+        provider=ProviderName.GEMINI,
+        name="x",
+        member_name="x",
+        target_month="x",
+        result=_ORIGINAL_RESULT,
+    )
+    assert job.effective_result == _ORIGINAL_RESULT
+
+    job.edited_result = _edited_payload()
+    assert job.effective_result == _edited_payload()
+    assert job.result == _ORIGINAL_RESULT  # untouched
+
+
+async def test_cross_user_edit_is_404_and_leaves_job_untouched(db, user_a: User, brag_client_b: AsyncClient):
+    document = await _make_document(db, user_a)
+    job = await _make_job(db, user_a, document, status=JobStatus.SUCCEEDED, result=_ORIGINAL_RESULT, hour_stats={})
+
+    resp = await brag_client_b.patch(f"/api/v1/brag-document-jobs/{job.id}", json=_edited_payload())
+    assert resp.status_code == 404
+
+    await db.refresh(job)
+    assert job.edited_result is None
+
+
+async def test_edit_before_job_succeeded_is_409(db, user_a: User, brag_client_a: AsyncClient):
+    document = await _make_document(db, user_a)
+    job = await _make_job(db, user_a, document, status=JobStatus.EXTRACTING)
+
+    resp = await brag_client_a.patch(f"/api/v1/brag-document-jobs/{job.id}", json=_edited_payload())
+    assert resp.status_code == 409
+
+
+async def test_owner_can_edit_and_reset_result(db, user_a: User, brag_client_a: AsyncClient):
+    document = await _make_document(db, user_a)
+    job = await _make_job(db, user_a, document, status=JobStatus.SUCCEEDED, result=_ORIGINAL_RESULT, hour_stats={})
+
+    edit_resp = await brag_client_a.patch(f"/api/v1/brag-document-jobs/{job.id}", json=_edited_payload())
+    assert edit_resp.status_code == 200
+    body = edit_resp.json()
+    assert body["is_edited"] is True
+    assert body["result"]["team_support_bullets"] == []
+
+    get_resp = await brag_client_a.get(f"/api/v1/brag-document-jobs/{job.id}")
+    assert get_resp.json()["result"]["team_support_bullets"] == []
+
+    reset_resp = await brag_client_a.post(f"/api/v1/brag-document-jobs/{job.id}/reset")
+    assert reset_resp.status_code == 200
+    reset_body = reset_resp.json()
+    assert reset_body["is_edited"] is False
+    assert reset_body["result"]["team_support_bullets"] == _ORIGINAL_RESULT["team_support_bullets"]
+
+
+async def test_cross_user_delete_is_404_and_leaves_job_untouched(db, user_a: User, brag_client_b: AsyncClient):
+    document = await _make_document(db, user_a)
+    job = await _make_job(db, user_a, document, status=JobStatus.SUCCEEDED, result={}, hour_stats={})
+
+    resp = await brag_client_b.delete(f"/api/v1/brag-document-jobs/{job.id}")
+    assert resp.status_code == 404
+
+    await db.refresh(job)
+    assert job.status == JobStatus.SUCCEEDED
+
+
+async def test_owner_can_delete_a_finished_job(db, user_a: User, brag_client_a: AsyncClient):
+    document = await _make_document(db, user_a)
+    job = await _make_job(db, user_a, document, status=JobStatus.SUCCEEDED, result={}, hour_stats={})
+
+    resp = await brag_client_a.delete(f"/api/v1/brag-document-jobs/{job.id}")
+    assert resp.status_code == 204
+
+    get_resp = await brag_client_a.get(f"/api/v1/brag-document-jobs/{job.id}")
+    assert get_resp.status_code == 404
+
+
+async def test_delete_while_still_generating_is_409(db, user_a: User, brag_client_a: AsyncClient):
+    document = await _make_document(db, user_a)
+    job = await _make_job(db, user_a, document, status=JobStatus.EXTRACTING)
+
+    resp = await brag_client_a.delete(f"/api/v1/brag-document-jobs/{job.id}")
+    assert resp.status_code == 409
+
+    await db.refresh(job)
+    assert job.status == JobStatus.EXTRACTING
+
+
 async def test_create_against_another_users_document_is_404(db, user_a: User, brag_client_b: AsyncClient):
     document = await _make_document(db, user_a)
 

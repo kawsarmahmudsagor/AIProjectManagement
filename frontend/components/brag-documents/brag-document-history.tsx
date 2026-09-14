@@ -4,6 +4,7 @@ import { FileText, Plus } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { Badge, Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { DeleteBragDocumentButton } from "@/components/brag-documents/delete-brag-document-button";
 import { useBragDocumentJobs } from "@/hooks/use-brag-document-job";
 import { formatTimestamp } from "@/lib/dates";
 import { cn } from "@/lib/utils";
@@ -86,7 +87,10 @@ export function BragDocumentHistory() {
                   {job.member_name} &middot; {formatTimestamp(job.created_at)}
                 </p>
               </div>
-              <StatusBadge status={job.status} />
+              <div className="flex shrink-0 items-center gap-2">
+                <StatusBadge status={job.status} />
+                <DeleteBragDocumentButton jobId={job.id} jobName={job.name} />
+              </div>
             </div>
           ))}
         </Card>

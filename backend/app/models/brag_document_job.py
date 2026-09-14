@@ -52,6 +52,12 @@ class BragDocumentJob(Base, UUIDPk):
 
     result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     hour_stats: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # The user's manually-edited version of `result` (same LLMBragDocumentResult shape),
+    # once they've saved at least one text edit or removal — routers/brag_documents.py's
+    # PATCH endpoint writes here, never to `result` itself, so the original LLM draft
+    # stays intact for the "reset changes" action (POST .../reset just clears this back
+    # to None). `result` is otherwise still the LLM's untouched output.
+    edited_result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -59,3 +65,10 @@ class BragDocumentJob(Base, UUIDPk):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    @property
+    def effective_result(self) -> dict | None:
+        """What every reader (the API response, both export renderers) should actually
+        show: the saved edit once one exists, else the original LLM draft. The one place
+        that decides between the two, so no caller has to know `edited_result` exists."""
+        return self.edited_result if self.edited_result is not None else self.result

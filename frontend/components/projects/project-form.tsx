@@ -2,27 +2,45 @@
 
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useQueryClient } from "@tanstack/react-query";
+import { FileInput } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useRef, useState } from "react";
-import { useForm } from "react-hook-form";
+import { useForm, useWatch } from "react-hook-form";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { DualEditorField } from "@/components/projects/fields/dual-editor-field";
-import { DocumentUpload } from "@/components/projects/upload/document-upload";
+import { ProjectThumbnailField } from "@/components/projects/fields/project-thumbnail-field";
+import { ProjectVideoField } from "@/components/projects/fields/project-video-field";
+import { ProjectInputDialog } from "@/components/projects/upload/project-input-dialog";
 import { PROJECTS_NAV_QUERY_KEY } from "@/components/layout/projects-nav-section";
 import { apiFetch, ApiError } from "@/lib/api-client";
 import { emptyProjectFormValues, projectFormSchema, type ProjectFormValues } from "@/lib/project-schema";
 import type { RichText } from "@/lib/rich-text/types";
-import type { ExtractionResult, Project } from "@/lib/types";
+import type { ExtractionResult, Project, ThumbnailGenerationContext } from "@/lib/types";
 
 type SectionAutofill = { token: number; long?: RichText; short?: RichText };
 const NO_AUTOFILL: SectionAutofill = { token: 0 };
+
+// Mirrors backend/app/services/thumbnail_service.has_sufficient_context exactly (same
+// 80-char / 2-technology thresholds) so the Generate button's enabled state never
+// disagrees with what the server will actually accept.
+const MIN_CONTEXT_CHARS = 80;
 
 export function ProjectForm({ project }: { project?: Project }) {
   const router = useRouter();
   const queryClient = useQueryClient();
   const [serverError, setServerError] = useState<string | null>(null);
+  const [inputDialogOpen, setInputDialogOpen] = useState(false);
+
+  // Holds the project's id once it exists — either passed in (edit mode) or created by
+  // an auto-save triggered from the thumbnail field (create mode, per the product
+  // decision to save first rather than send unsaved-form context inline). Switching the
+  // form to PATCH-mode in place this way avoids remounting at the edit URL mid-flow,
+  // which would collide with the thumbnail/video fields' own in-progress state.
+  const [savedProjectId, setSavedProjectId] = useState<string | null>(project?.id ?? null);
+  const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(project?.thumbnail?.url ?? null);
+  const [videoUrl, setVideoUrl] = useState<string | null>(project?.video?.url ?? null);
 
   const [descriptionAutofill, setDescriptionAutofill] = useState<SectionAutofill>(NO_AUTOFILL);
   const [responsibilitiesAutofill, setResponsibilitiesAutofill] = useState<SectionAutofill>(NO_AUTOFILL);
@@ -35,6 +53,7 @@ export function ProjectForm({ project }: { project?: Project }) {
     control,
     getValues,
     setValue,
+    trigger,
     formState: { errors, isSubmitting, dirtyFields },
   } = useForm<ProjectFormValues>({
     resolver: zodResolver(projectFormSchema),
@@ -65,6 +84,37 @@ export function ProjectForm({ project }: { project?: Project }) {
         : undefined,
     };
   };
+
+  const buildThumbnailContext = (): ThumbnailGenerationContext => {
+    const values = getValues();
+    return {
+      name: values.name || undefined,
+      role: values.role || undefined,
+      technologies: values.technologies
+        ? values.technologies.split(",").map((t) => t.trim()).filter(Boolean)
+        : undefined,
+      description_text: values.description.long.text || values.description.short.text || undefined,
+      responsibilities_text: values.responsibilities.long.text || values.responsibilities.short.text || undefined,
+    };
+  };
+
+  // Reactive, so the Generate button's disabled state updates live as the user types —
+  // same idiom as DualEditorField's own reactive empty-checks via useWatch.
+  const [watchedDescLong, watchedDescShort, watchedRespLong, watchedRespShort, watchedTech] = useWatch({
+    control,
+    name: [
+      "description.long.text",
+      "description.short.text",
+      "responsibilities.long.text",
+      "responsibilities.short.text",
+      "technologies",
+    ],
+  });
+  const contextCharCount = [watchedDescLong, watchedDescShort, watchedRespLong, watchedRespShort]
+    .filter(Boolean)
+    .join(" ").length;
+  const contextTechCount = watchedTech ? watchedTech.split(",").map((t) => t.trim()).filter(Boolean).length : 0;
+  const hasThumbnailContext = contextCharCount >= MIN_CONTEXT_CHARS || contextTechCount >= 2;
 
   // Extraction never overwrites a field the user has already touched or already
   // filled — same "AI never overwrites hand-written prose silently" rule as the
@@ -105,27 +155,62 @@ export function ProjectForm({ project }: { project?: Project }) {
     setResponsibilitiesAutofill(sectionAutofill("responsibilities", p.responsibilities.long, p.responsibilities.short));
   };
 
-  const onSubmit = async (values: ProjectFormValues) => {
-    setServerError(null);
-    const payload = {
-      name: values.name,
-      role: values.role,
-      start_date: values.start_date,
-      end_date: values.is_current ? null : values.end_date || null,
-      is_current: values.is_current,
-      description: values.description,
-      responsibilities: values.responsibilities,
-      technologies: values.technologies
-        .split(",")
-        .map((t) => t.trim())
-        .filter(Boolean),
-      project_url: values.project_url || null,
-    };
+  const buildPayload = (values: ProjectFormValues) => ({
+    name: values.name,
+    role: values.role,
+    start_date: values.start_date,
+    end_date: values.is_current ? null : values.end_date || null,
+    is_current: values.is_current,
+    description: values.description,
+    responsibilities: values.responsibilities,
+    technologies: values.technologies
+      .split(",")
+      .map((t) => t.trim())
+      .filter(Boolean),
+    project_url: values.project_url || null,
+  });
+
+  /** Shared by the form's own submit AND the thumbnail/video fields' auto-save-first
+   * flow — PATCHes once `savedProjectId` exists (whether from the original edit-mode
+   * prop or from an earlier auto-save this session), POSTs otherwise. */
+  const saveProject = async (values: ProjectFormValues): Promise<Project> => {
+    const payload = buildPayload(values);
+    return savedProjectId
+      ? apiFetch<Project>(`projects/${savedProjectId}`, { method: "PATCH", body: JSON.stringify(payload) })
+      : apiFetch<Project>("projects", { method: "POST", body: JSON.stringify(payload) });
+  };
+
+  /** Passed to ProjectThumbnailField/ProjectVideoField as `ensureSaved`. Already-saved
+   * projects return immediately with no network call; an unsaved (create-mode) project
+   * is validated (react-hook-form's trigger(), the same zod schema the real submit
+   * uses) and saved before generating/uploading — per the product decision to auto-save
+   * rather than send unsaved-form context inline. Returns null (and surfaces the
+   * validation/save error inline) if either step fails, so the caller knows not to
+   * proceed. */
+  const ensureSaved = async (): Promise<string | null> => {
+    if (savedProjectId) return savedProjectId;
+
+    const valid = await trigger();
+    if (!valid) {
+      setServerError("Fill in the required project fields first, then try again.");
+      return null;
+    }
 
     try {
-      const saved = project
-        ? await apiFetch<Project>(`projects/${project.id}`, { method: "PATCH", body: JSON.stringify(payload) })
-        : await apiFetch<Project>("projects", { method: "POST", body: JSON.stringify(payload) });
+      const saved = await saveProject(getValues());
+      setSavedProjectId(saved.id);
+      queryClient.invalidateQueries({ queryKey: PROJECTS_NAV_QUERY_KEY });
+      return saved.id;
+    } catch (err) {
+      setServerError(err instanceof ApiError ? err.message : "Could not save the project");
+      return null;
+    }
+  };
+
+  const onSubmit = async (values: ProjectFormValues) => {
+    setServerError(null);
+    try {
+      const saved = await saveProject(values);
       queryClient.invalidateQueries({ queryKey: PROJECTS_NAV_QUERY_KEY });
       router.replace(`/projects/${saved.id}`);
       router.refresh();
@@ -136,36 +221,59 @@ export function ProjectForm({ project }: { project?: Project }) {
 
   return (
     <form onSubmit={handleSubmit(onSubmit)} className="space-y-6">
-      {!project && <DocumentUpload onExtracted={handleExtracted} disabled={isSubmitting} />}
-
       <Card className="space-y-4">
-        <div>
-          <label className="mb-1 block text-sm font-medium">Project Name</label>
-          <Input placeholder="Enter project name" {...register("name")} />
-          {errors.name && <p className="mt-1 text-xs text-danger">{errors.name.message}</p>}
-        </div>
-        <div>
-          <label className="mb-1 block text-sm font-medium">Your Role</label>
-          <Input placeholder="e.g. Lead Developer" {...register("role")} />
-          {errors.role && <p className="mt-1 text-xs text-danger">{errors.role.message}</p>}
-        </div>
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <label className="mb-1 block text-sm font-medium">Start Date</label>
-            <Input type="date" {...register("start_date")} />
-            {errors.start_date && <p className="mt-1 text-xs text-danger">{errors.start_date.message}</p>}
-          </div>
-          <div>
-            <label className="mb-1 block text-sm font-medium">End Date</label>
-            <Input type="date" disabled={isCurrent} {...register("end_date")} />
-            {errors.end_date && <p className="mt-1 text-xs text-danger">{errors.end_date.message}</p>}
-            <label className="mt-2 flex items-center gap-2 text-sm">
-              <input type="checkbox" {...register("is_current")} />
-              Current Project
-            </label>
+        <div className="flex flex-col gap-6 @2xl:flex-row">
+          <ProjectThumbnailField
+            projectId={savedProjectId}
+            thumbnailUrl={thumbnailUrl}
+            onThumbnailChange={setThumbnailUrl}
+            hasContext={hasThumbnailContext}
+            buildContext={buildThumbnailContext}
+            ensureSaved={ensureSaved}
+            disabled={isSubmitting}
+          />
+          <div className="min-w-0 flex-1 space-y-4">
+            <div className="flex justify-end">
+              <Button type="button" variant="secondary" size="sm" onClick={() => setInputDialogOpen(true)} disabled={isSubmitting}>
+                <FileInput size={13} /> Input
+              </Button>
+            </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium">Project Name</label>
+              <Input placeholder="Enter project name" {...register("name")} />
+              {errors.name && <p className="mt-1 text-xs text-danger">{errors.name.message}</p>}
+            </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium">Your Role</label>
+              <Input placeholder="e.g. Lead Developer" {...register("role")} />
+              {errors.role && <p className="mt-1 text-xs text-danger">{errors.role.message}</p>}
+            </div>
+            <div className="grid grid-cols-1 gap-4 @md:grid-cols-2">
+              <div>
+                <label className="mb-1 block text-sm font-medium">Start Date</label>
+                <Input type="date" {...register("start_date")} />
+                {errors.start_date && <p className="mt-1 text-xs text-danger">{errors.start_date.message}</p>}
+              </div>
+              <div>
+                <label className="mb-1 block text-sm font-medium">End Date</label>
+                <Input type="date" disabled={isCurrent} {...register("end_date")} />
+                {errors.end_date && <p className="mt-1 text-xs text-danger">{errors.end_date.message}</p>}
+                <label className="mt-2 flex items-center gap-2 text-sm">
+                  <input type="checkbox" {...register("is_current")} />
+                  Current Project
+                </label>
+              </div>
+            </div>
           </div>
         </div>
       </Card>
+
+      <ProjectInputDialog
+        open={inputDialogOpen}
+        onClose={() => setInputDialogOpen(false)}
+        onExtracted={handleExtracted}
+        disabled={isSubmitting}
+      />
 
       <Card>
         <DualEditorField
@@ -246,6 +354,13 @@ export function ProjectForm({ project }: { project?: Project }) {
           <label className="mb-1 block text-sm font-medium">Project URL (Optional)</label>
           <Input placeholder="https://..." {...register("project_url")} />
         </div>
+        <ProjectVideoField
+          projectId={savedProjectId}
+          videoUrl={videoUrl}
+          onVideoChange={setVideoUrl}
+          ensureSaved={ensureSaved}
+          disabled={isSubmitting}
+        />
       </Card>
 
       {serverError && <p className="text-sm text-danger">{serverError}</p>}

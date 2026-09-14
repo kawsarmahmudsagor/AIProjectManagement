@@ -3,5 +3,10 @@ import { requireSession } from "@/lib/session";
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const user = await requireSession();
-  return <AppShell email={user.email}>{children}</AppShell>;
+  const displayName = user.preferred_name || user.first_name;
+  return (
+    <AppShell displayName={displayName} email={user.email}>
+      {children}
+    </AppShell>
+  );
 }

@@ -72,11 +72,13 @@ tasks added by hand.
 
 **In chat:** a user can also ask Jarvis directly, e.g. "break down building a login page
 into tasks for the Billing project" — Jarvis drafts the same kind of proposal from the
-description given in the conversation (it has no way to attach a document to a chat
-message, so document-based breakdown still needs the project's task page) and lists the
-proposed tasks back in the chat. It never creates anything until the user says which ones
-to keep (or "all") — only after that confirmation does Jarvis actually create the Task
-rows.
+description given in the conversation, including the text of any document attached to
+the message (see "Attachments in chat" below), and lists the proposed tasks back in the
+chat. A document attached this way is used only for that one conversation — if the user
+wants it permanently stored against the project as a resumable, cancellable job, they
+still use the project's task page instead. It never creates anything until the user says
+which ones to keep (or "all") — only after that confirmation does Jarvis actually create
+the Task rows.
 
 ## Export
 
@@ -98,6 +100,20 @@ Document Generator features described above, right from the conversation — see
 chat" note at the end of each of those two sections. Outside of those two flows, Jarvis
 cannot create, edit, or delete a task or project itself — it can only look things up and
 talk about them; any other change still has to be made by the user directly in the app.
+
+**Attachments in chat:** a message to Jarvis can include up to 5 files at once, attached
+from the chat composer. Images are genuinely seen by the AI — Jarvis can describe, read
+text from, or answer questions about an attached screenshot or photo. PDF, DOCX, and
+plain-text/code files (any programming language, config, or markup file) are read as
+text and included as context for that message; a scanned PDF with no extractable text is
+still accepted, but Jarvis is told plainly that no text could be read from it rather than
+guessing at its contents. Spreadsheets (`.xlsx`) are not accepted as chat attachments —
+the Brag Document Generator's own upload flow is the only route for those (see above).
+Each file has its own size limit, and an attachment can be removed from the composer
+before sending; once a message is sent, its attachments become a permanent part of that
+message's history, replayed back to Jarvis on later turns the same way the rest of the
+conversation is.
+
 In Settings > Chatbot, a user
 can choose which AI provider (Gemini or OpenAI) drives Jarvis, and can turn on
 "Preemptive suggestions" — when enabled, Jarvis may proactively mention a relevant GitHub
@@ -191,7 +207,8 @@ including the DOCX/PDF download links.
 
 **In chat:** a user can also ask Jarvis to generate a brag document directly in the
 conversation. The `.xlsx` upload itself still has to happen through the Brag Documents
-page first (chat has no file-attachment mechanism) — once it's uploaded, Jarvis can find
+page first — chat attachments (see "Attachments in chat" below) accept images and
+documents, but spreadsheets are explicitly out of scope there — once it's uploaded, Jarvis can find
 it, auto-detect (or ask which) row and month, generate the document, and show the drafted
 sections and exact hour-stats numbers right in the chat. Jarvis cannot hand over a DOCX/PDF
 file in chat, so for the download it points the user to the Brag Documents page to open

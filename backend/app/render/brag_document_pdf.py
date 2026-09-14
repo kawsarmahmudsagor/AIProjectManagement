@@ -17,7 +17,7 @@ _env = Environment(
 
 def render_brag_document_html(job: BragDocumentJob) -> str:
     template = _env.get_template("brag_document.html")
-    return template.render(job=job, result=job.result or {}, stats=job.hour_stats or {})
+    return template.render(job=job, result=job.effective_result or {}, stats=job.hour_stats or {})
 
 
 async def render_brag_document_pdf(browser: Browser, job: BragDocumentJob) -> bytes:

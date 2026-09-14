@@ -2,7 +2,7 @@
 
 import { createContext, useCallback, useContext, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
+import { Dialog } from "@/components/ui/dialog";
 import { providerErrorKind, providerErrorMessage } from "@/lib/provider-errors";
 
 type ProviderErrorInput = { code?: string; provider?: string | null };
@@ -31,30 +31,19 @@ export function ProviderErrorModalProvider({ children }: { children: React.React
   return (
     <ProviderErrorModalContext.Provider value={show}>
       {children}
-      {state && (
-        <div
-          role="alertdialog"
-          aria-modal="true"
-          aria-labelledby="provider-error-message"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-          onClick={dismiss}
-        >
-          <Card
-            className="w-full max-w-sm space-y-4 text-center shadow-xl"
-            onClick={(e) => e.stopPropagation()}
-          >
+      <Dialog open={state !== null} onClose={dismiss} aria-label="Provider error" className="max-w-sm">
+        {state && (
+          <div className="space-y-4 p-4 text-center">
             <p className="text-4xl" aria-hidden="true">
               {state.kind === "expired" ? "😅" : "💳"}
             </p>
-            <p id="provider-error-message" className="text-sm font-medium">
-              {providerErrorMessage(state.kind, state.provider)}
-            </p>
+            <p className="text-sm font-medium">{providerErrorMessage(state.kind, state.provider)}</p>
             <Button type="button" onClick={dismiss} className="w-full">
               Got it
             </Button>
-          </Card>
-        </div>
-      )}
+          </div>
+        )}
+      </Dialog>
     </ProviderErrorModalContext.Provider>
   );
 }

@@ -1,9 +1,11 @@
 """DOCX export for a completed Brag Document job — adapts the reference standup_cli
 tool's `generate_brag_document_docx` (Calibri/heading-color conventions, same as this
 app's own render/docx.py), with the "Usage Details" section removed entirely (plan
-decision #4). Reads only `job.result` (LLM-authored prose) and `job.hour_stats`
+decision #4). Reads only `job.effective_result` (the LLM-authored prose, or the user's
+saved edits over it — see BragDocumentJob.effective_result) and `job.hour_stats`
 (deterministic arithmetic) — the subtitle line is built from `hour_stats` only, never
-from `result`, so a hallucinated hour figure could never reach an exported document.
+from the drafted/edited result, so a hallucinated hour figure could never reach an
+exported document.
 """
 
 import io
@@ -71,7 +73,7 @@ def _add_paragraph(document: Document, text: str, *, italic: bool = False):
 
 
 def render_brag_document_docx(job: BragDocumentJob) -> bytes:
-    result = job.result or {}
+    result = job.effective_result or {}
     stats = job.hour_stats or {}
 
     document = Document()

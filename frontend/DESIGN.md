@@ -1,5 +1,47 @@
 # Frontend Architecture — AI Project Management Platform
 
+> **⚠ This document is a design proposal, not a description of the shipped app.** Large parts
+> of it were written aspirationally — planned decisions and a target component tree — and were
+> never built as specified, or were superseded by a later redesign (September 2026: dashboard
+> became a summary surface, project cards gained thumbnails/video, chat became a resizable
+> dock, and the design tokens in `app/globals.css` were rewritten with a full palette/type/
+> radius/shadow scale). Verified against the actual repo on 2026-09-11:
+>
+> **Real / still accurate:**
+> - Next.js 16 App Router, TypeScript, Tailwind v4 CSS-first `@theme` (no `tailwind.config.js`)
+> - Tiptap 3.30.x for rich text (`@tiptap/react`, `@tiptap/starter-kit`,
+>   `@tiptap/extension-character-count`, `@tiptap/extension-placeholder`)
+> - React Hook Form + Zod, TanStack Query v5
+> - The BFF pattern in general terms — a Next Route Handler proxy in front of FastAPI — though
+>   the exact cookie names, refresh flow, and `proxy.ts` matcher shown in §5 have not been
+>   checked line-by-line against `app/api/` and should be re-verified before relying on them
+> - The job-polling pattern (§4.2) in spirit — the real hook is `hooks/use-job-poll.ts`, generic
+>   over any `{status: JobStatus}` shape, not the bespoke `useExtractionJob` shown here
+>
+> **Fictional / never built — do not use as reference:**
+> - **§1 Stack table**: no shadcn/ui, no Base UI, no Radix anywhere in this codebase. All of
+>   `components/ui/*` is hand-rolled (Button, Card, Badge, Dialog, Tabs, etc., ~20-40 lines
+>   each, built directly on Tailwind classes). No `sonner` (toasts are a hand-rolled
+>   `ui/toaster.tsx`), no `@daypicker/react` (date inputs are plain `<input type="date">`).
+> - **§2 route/file tree and §3 component tree**: no `client/` directory (`@hey-api/openapi-ts`
+>   was never adopted — there is no generated SDK; API calls go through hand-written functions
+>   in `lib/*.ts` that call the BFF via `fetch`), no `features/` directory (that logic lives
+>   directly under `components/`, `hooks/`, and `lib/`), and named files like
+>   `add-project-card.tsx`, `ai-review-bar.tsx`, `technologies-field.tsx`, `topbar.tsx` do not
+>   exist. The dashboard is **not** a project-card grid (see the September 2026 redesign: it's
+>   a summary page — skills chip cloud, compact project list, global search — with the card
+>   grid living only on `/projects`).
+> - **§6 API client layer**: describes `@hey-api/openapi-ts` codegen that was never set up.
+> - Any file path or component name elsewhere in this doc that doesn't match what's on disk —
+>   treat the prose describing *behavior* and *tradeoffs* as more trustworthy than literal
+>   paths/names, and grep the actual `components/`, `hooks/`, `lib/` directories before citing
+>   this file as a source of truth.
+>
+> Sections **§4.5 (AI work breakdown)**, **§9 milestones marked "(delivered)"**, **§10 (Jarvis
+> chat widget)**, and **§11 (Profile page)** describe features that were genuinely implemented,
+> though some of their own internal file/component names may have drifted since — spot-check
+> against the real `components/` tree rather than assuming exactness.
+
 Everything below is verified against the ecosystem as of **August 2026** (searches at the end). Where 2026 changed something that older tutorials still get wrong, I've flagged it — most importantly: **`middleware.ts` is deprecated and renamed to `proxy.ts` in Next.js 16**, and **shadcn/ui's default primitive layer is now Base UI, not Radix**.
 
 ---

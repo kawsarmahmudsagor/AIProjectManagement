@@ -24,34 +24,75 @@ Ollama which had no document-vision path at all.
 
 import base64
 import json
+from uuid import UUID
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.ai_provider_setting import ProviderName
 from app.models.user import AgentPersona
 from app.providers.base import (
     BragDocumentInput,
     BreakdownInput,
     ConnectionStatus,
     ExtractInput,
+    FAQPromptInput,
+    GeneratedImage,
     LLMProvider,
     ProviderError,
+    ThumbnailPromptInput,
 )
 from app.providers.prompts import (
     BRAG_DOCUMENT_SYSTEM_PROMPTS,
     BREAKDOWN_SYSTEM_PROMPTS,
     EXTRACTION_SYSTEM_PROMPTS,
+    FAQ_SYSTEM_PROMPTS,
+    POSTER_DESIGN_SYSTEM_PROMPT,
     REWRITE_SYSTEM_PROMPTS,
     build_brag_document_prompt,
     build_breakdown_prompt,
+    build_faq_prompt,
+    build_poster_design_prompt,
     build_rewrite_prompt,
 )
+from app.services.usage_service import record_usage
 
 
 class OpenAIProvider(LLMProvider):
-    def __init__(self, api_key: str, model: str = "gpt-4.1-mini"):
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "gpt-4.1-mini",
+        *,
+        db: AsyncSession | None = None,
+        user_id: UUID | None = None,
+        operation: str | None = None,
+    ):
         self._api_key = api_key
         self._model_name = model
+        # Present only when constructed via registry.get_provider — direct construction
+        # (ai_settings.py's test_connection) leaves these None, and _log_usage below
+        # no-ops in that case since test_connection never calls a logged method anyway.
+        self._db = db
+        self._user_id = user_id
+        self._operation = operation
+
+    @property
+    def model(self) -> str:
+        return self._model_name
+
+    async def _log_usage(self, response: AIMessage) -> None:
+        if self._db is None or self._user_id is None:
+            return
+        await record_usage(
+            self._db,
+            user_id=self._user_id,
+            provider=ProviderName.OPENAI,
+            model=self._model_name,
+            operation=self._operation or "unknown",
+            usage=getattr(response, "usage_metadata", None),
+        )
 
     def _chat(self, *, temperature: float, max_tokens: int, response_format: dict | None = None):
         # A fresh instance per call — cheap wrappers, no persistent connection, keeps
@@ -97,6 +138,8 @@ class OpenAIProvider(LLMProvider):
             code, retryable = _classify_error(exc)
             raise ProviderError(code, str(exc), retryable=retryable) from exc
 
+        await self._log_usage(response)
+
         finish_reason = (response.response_metadata or {}).get("finish_reason")
         if finish_reason == "length":
             raise ProviderError(
@@ -131,6 +174,8 @@ class OpenAIProvider(LLMProvider):
         except Exception as exc:
             code, retryable = _classify_error(exc)
             raise ProviderError(code, str(exc), retryable=retryable) from exc
+
+        await self._log_usage(response)
 
         if not response.content:
             raise ProviderError("EMPTY_RESPONSE", "OpenAI returned no content", retryable=True)
@@ -181,6 +226,8 @@ class OpenAIProvider(LLMProvider):
             code, retryable = _classify_error(exc)
             raise ProviderError(code, str(exc), retryable=retryable) from exc
 
+        await self._log_usage(response)
+
         finish_reason = (response.response_metadata or {}).get("finish_reason")
         if finish_reason == "length":
             raise ProviderError(
@@ -219,6 +266,8 @@ class OpenAIProvider(LLMProvider):
             code, retryable = _classify_error(exc)
             raise ProviderError(code, str(exc), retryable=retryable) from exc
 
+        await self._log_usage(response)
+
         finish_reason = (response.response_metadata or {}).get("finish_reason")
         if finish_reason == "length":
             raise ProviderError(
@@ -229,6 +278,67 @@ class OpenAIProvider(LLMProvider):
         if not response.content:
             raise ProviderError("EMPTY_RESPONSE", "OpenAI returned no content", retryable=True)
 
+        return json.loads(response.content)
+
+    async def generate_image(self, prompt: str, *, aspect_ratio: str = "16:9") -> GeneratedImage:
+        """OpenAI image generation is out of scope for this feature today — this always
+        raises IMAGE_GENERATION_UNSUPPORTED, which services/thumbnail_service.py treats
+        as "fall back to the deterministic SVG poster" rather than a hard failure. An
+        OpenAI-configured user still gets a real generated thumbnail via design_poster
+        below (a text-model call, which OpenAI does support), just not a raster image."""
+        raise ProviderError(
+            "IMAGE_GENERATION_UNSUPPORTED", "Image generation isn't available for the OpenAI provider yet."
+        )
+
+    async def design_poster(
+        self, ctx: ThumbnailPromptInput, json_schema: dict, *, persona: AgentPersona
+    ) -> dict:
+        chat = self._chat(
+            temperature=0.7,
+            max_tokens=2048,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"name": "poster_spec", "schema": json_schema, "strict": False},
+            },
+        )
+        try:
+            response = await chat.ainvoke(
+                [
+                    SystemMessage(content=POSTER_DESIGN_SYSTEM_PROMPT),
+                    HumanMessage(content=build_poster_design_prompt(ctx)),
+                ]
+            )
+        except Exception as exc:
+            code, retryable = _classify_error(exc)
+            raise ProviderError(code, str(exc), retryable=retryable) from exc
+
+        await self._log_usage(response)
+
+        if not response.content:
+            raise ProviderError("EMPTY_RESPONSE", "OpenAI returned no content", retryable=True)
+        return json.loads(response.content)
+
+    async def generate_faq(self, ctx: FAQPromptInput, json_schema: dict, *, persona: AgentPersona) -> dict:
+        chat = self._chat(
+            temperature=0.6,
+            max_tokens=2048,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"name": "faq_result", "schema": json_schema, "strict": False},
+            },
+        )
+        try:
+            response = await chat.ainvoke(
+                [SystemMessage(content=FAQ_SYSTEM_PROMPTS[persona]), HumanMessage(content=build_faq_prompt(ctx))]
+            )
+        except Exception as exc:
+            code, retryable = _classify_error(exc)
+            raise ProviderError(code, str(exc), retryable=retryable) from exc
+
+        await self._log_usage(response)
+
+        if not response.content:
+            raise ProviderError("EMPTY_RESPONSE", "OpenAI returned no content", retryable=True)
         return json.loads(response.content)
 
     def get_chat_model(self) -> ChatOpenAI:

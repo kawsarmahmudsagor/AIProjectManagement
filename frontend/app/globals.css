@@ -1,21 +1,256 @@
 @import "tailwindcss";
 @plugin "@tailwindcss/typography";
 
+/* ---------------------------------------------------------------------------
+ * Design tokens (redesign, see plans/dashboard-will-contain-the-calm-forest.md
+ * Part 7). Light is the base :root; dark is redefined twice — once for the
+ * system "no explicit choice" case (prefers-color-scheme, guarded so an
+ * explicit `data-theme="light"` always wins) and once for an explicit
+ * `data-theme="dark"` toggle — so the in-app toggle overrides the OS setting
+ * in both directions. Never give a token its only definition inside one of
+ * the dark blocks below.
+ *
+ * The original flat token names (--background, --surface, --muted, ...) are
+ * kept as ALIASES onto the new system throughout this file and in the
+ * @theme block below, so every existing `bg-surface`/`text-muted`/
+ * `border-accent/60` utility keeps resolving unchanged while the redesign
+ * lands page-by-page. They are removed once every page has migrated to the
+ * new names (plan Part 7.9 / Wave 4).
+ * ------------------------------------------------------------------------- */
+
 :root {
-  --background: #0b0e17;
-  --surface: #10141f;
-  --surface-2: #151a28;
-  --border: #232a3d;
-  --foreground: #e7e9f2;
-  --muted: #8890a6;
-  --accent: #3b82f6;
-  --accent-foreground: #ffffff;
-  --danger: #ef4444;
-  --success: #22c55e;
-  --warning: #f59e0b;
+  /* Surfaces (elevation ramp, lightest -> not literally lighter in dark mode,
+     but always "one step up" from canvas) */
+  --bg-canvas: #fbfcfd;
+  --bg-sunken: #f2f4f7;
+  --surface-1: #ffffff;
+  --surface-2: #f7f8fa;
+  --surface-3: #eef0f4;
+
+  /* Borders, weakest to strongest */
+  --border-subtle: #e8eaee;
+  --border-default: #d8dce3;
+  --border-strong: #b9c0cb;
+
+  /* Text hierarchy */
+  --text-primary: #10131b;
+  --text-secondary: #545c6b;
+  --text-tertiary: #767e8d;
+  --text-disabled: #a2a9b5;
+
+  /* Accent (brand/interactive) */
+  --accent-solid: #2f6fe0;
+  --accent-hover: #255fc9;
+  --accent-active: #1e50ab;
+  --accent-subtle: #eaf1fe;
+  --accent-border: #bcd3fb;
+  --accent-fg: #ffffff;
+
+  /* Semantic states, each a subtle-bg/border/text triplet */
+  --danger-solid: #d93a3a;
+  --danger-subtle: #fdecec;
+  --danger-border: #f6c6c6;
+  --success-solid: #16a34a;
+  --success-subtle: #e9f7ef;
+  --success-border: #bfe6cd;
+  --warning-solid: #b7791f;
+  --warning-subtle: #fdf3e2;
+  --warning-border: #f0dcb0;
+
+  /* Shadows — tuned per-theme; dark needs higher alpha / tighter blur to read
+     as depth at all against a dark ground */
+  --shadow-1: 0 1px 2px rgb(16 19 27 / 0.06);
+  --shadow-2: 0 4px 12px rgb(16 19 27 / 0.08);
+  --shadow-3: 0 16px 40px rgb(16 19 27 / 0.12);
+
+  /* Radius scale */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-2xl: 16px;
+
+  /* Z-index scale — fixes 7 ad-hoc values that used to collide (two different
+     meanings both used z-50). Toast outranks modal so a failure is never
+     hidden behind one. */
+  --z-raised: 10;
+  --z-sticky: 20;
+  --z-dock: 30;
+  --z-overlay: 40;
+  --z-modal: 50;
+  --z-popover: 60;
+  --z-toast: 70;
+
+  /* Motion */
+  --dur-fast: 120ms;
+  --dur-base: 180ms;
+  --dur-slow: 260ms;
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* --- Back-compat aliases onto the flat names every existing component uses --- */
+  --background: var(--bg-canvas);
+  --surface: var(--surface-1);
+  --surface-2: var(--surface-2);
+  --border: var(--border-default);
+  --foreground: var(--text-primary);
+  --muted: var(--text-secondary);
+  --accent: var(--accent-solid);
+  --accent-foreground: var(--accent-fg);
+  --danger: var(--danger-solid);
+  --success: var(--success-solid);
+  --warning: var(--warning-solid);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg-canvas: #0a0c12;
+    --bg-sunken: #07090d;
+    --surface-1: #10131b;
+    --surface-2: #161a24;
+    --surface-3: #1d222e;
+
+    --border-subtle: #1f242f;
+    --border-default: #2a3040;
+    --border-strong: #3a4254;
+
+    --text-primary: #e8eaf0;
+    --text-secondary: #9aa3b5;
+    --text-tertiary: #6e7688;
+    --text-disabled: #4a5163;
+
+    --accent-solid: #3b82f6;
+    --accent-hover: #5b95f8;
+    --accent-active: #2f6fe0;
+    --accent-subtle: #16233c;
+    --accent-border: #2b4a80;
+    --accent-fg: #ffffff;
+
+    --danger-solid: #ef4444;
+    --danger-subtle: #2a1414;
+    --danger-border: #5c2323;
+    --success-solid: #22c55e;
+    --success-subtle: #10261a;
+    --success-border: #1f4a30;
+    --warning-solid: #f59e0b;
+    --warning-subtle: #2c220e;
+    --warning-border: #55401a;
+
+    --shadow-1: 0 1px 2px rgb(0 0 0 / 0.35);
+    --shadow-2: 0 4px 12px rgb(0 0 0 / 0.45);
+    --shadow-3: 0 16px 40px rgb(0 0 0 / 0.55);
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg-canvas: #0a0c12;
+  --bg-sunken: #07090d;
+  --surface-1: #10131b;
+  --surface-2: #161a24;
+  --surface-3: #1d222e;
+
+  --border-subtle: #1f242f;
+  --border-default: #2a3040;
+  --border-strong: #3a4254;
+
+  --text-primary: #e8eaf0;
+  --text-secondary: #9aa3b5;
+  --text-tertiary: #6e7688;
+  --text-disabled: #4a5163;
+
+  --accent-solid: #3b82f6;
+  --accent-hover: #5b95f8;
+  --accent-active: #2f6fe0;
+  --accent-subtle: #16233c;
+  --accent-border: #2b4a80;
+  --accent-fg: #ffffff;
+
+  --danger-solid: #ef4444;
+  --danger-subtle: #2a1414;
+  --danger-border: #5c2323;
+  --success-solid: #22c55e;
+  --success-subtle: #10261a;
+  --success-border: #1f4a30;
+  --warning-solid: #f59e0b;
+  --warning-subtle: #2c220e;
+  --warning-border: #55401a;
+
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.35);
+  --shadow-2: 0 4px 12px rgb(0 0 0 / 0.45);
+  --shadow-3: 0 16px 40px rgb(0 0 0 / 0.55);
 }
 
 @theme inline {
+  /* New token names.
+   *
+   * IMPORTANT naming rule (verified empirically against the installed Tailwind v4
+   * engine — see the redesign plan's verification notes): Tailwind generates a color
+   * utility as `.{family}-{name}` where `{name}` is EVERYTHING after `--color-`, across
+   * every applicable family (bg-/text-/border-/ring-/...). Naming a token
+   * `--color-bg-canvas` therefore produces `.bg-bg-canvas`, NOT `.bg-canvas` — the
+   * "bg"/"text"/"border" family word must never be baked into the token's own name.
+   * Every name below is deliberately family-word-free for this reason; the raw CSS
+   * variable it points to (right-hand `var(--...)`) is unaffected and keeps its
+   * originally-planned name. */
+  --color-canvas: var(--bg-canvas);
+  --color-sunken: var(--bg-sunken);
+  --color-surface-1: var(--surface-1);
+  --color-surface-3: var(--surface-3);
+  --color-hairline: var(--border-subtle);
+  --color-edge: var(--border-default);
+  --color-edge-strong: var(--border-strong);
+  --color-ink: var(--text-primary);
+  --color-ink-soft: var(--text-secondary);
+  --color-ink-faint: var(--text-tertiary);
+  --color-ink-disabled: var(--text-disabled);
+  --color-accent-solid: var(--accent-solid);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-active: var(--accent-active);
+  --color-accent-subtle: var(--accent-subtle);
+  --color-accent-line: var(--accent-border);
+  --color-accent-fg: var(--accent-fg);
+  --color-danger-solid: var(--danger-solid);
+  --color-danger-subtle: var(--danger-subtle);
+  --color-danger-line: var(--danger-border);
+  --color-success-solid: var(--success-solid);
+  --color-success-subtle: var(--success-subtle);
+  --color-success-line: var(--success-border);
+  --color-warning-solid: var(--warning-solid);
+  --color-warning-subtle: var(--warning-subtle);
+  --color-warning-line: var(--warning-border);
+
+  /* --radius-sm/md/lg/xl/2xl are NOT redeclared here — they're already Tailwind's own
+     built-in theme tokens (driving rounded-sm/md/lg/xl/2xl), and the plain :root
+     overrides above already replace their values. Redeclaring `--radius-sm: var(--radius-sm)`
+     here would be a circular self-reference onto the same custom property, not an alias
+     onto a different one. */
+
+  /* New, distinctly-named shadow scale (shadow-elevation-1/2/3) — deliberately not
+     reusing Tailwind's own --shadow-sm/md/lg names, so this scale reads as "this app's
+     elevation system" rather than colliding with Tailwind's unrelated defaults. */
+  --shadow-elevation-1: var(--shadow-1);
+  --shadow-elevation-2: var(--shadow-2);
+  --shadow-elevation-3: var(--shadow-3);
+
+  /* Type scale */
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1rem;
+  --text-xs: 0.75rem;
+  --text-xs--line-height: 1rem;
+  --text-sm: 0.8125rem;
+  --text-sm--line-height: 1.25rem;
+  --text-base: 0.875rem;
+  --text-base--line-height: 1.3125rem;
+  --text-lg: 1.0625rem;
+  --text-lg--line-height: 1.5rem;
+  --text-xl: 1.25rem;
+  --text-xl--line-height: 1.75rem;
+  --text-2xl: 1.5rem;
+  --text-2xl--line-height: 2rem;
+  --text-3xl: 1.875rem;
+  --text-3xl--line-height: 2.375rem;
+
+  /* --- Back-compat: old flat names as Tailwind color utilities too --- */
   --color-background: var(--background);
   --color-surface: var(--surface);
   --color-surface-2: var(--surface-2);
@@ -32,13 +267,36 @@
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
+  /* Colorful gradient glows over the flat canvas, so a backdrop-blur surface (Card,
+     below) actually has something to blur — a single-hue tint like --accent-subtle
+     turned out too close in luminance to the dark-mode canvas to read as a glow at all
+     (verified: rendered but invisible). Reuses the same Gemini-sparkle palette as the
+     .ai-glow effect above (#4285f4 blue / #9b72cb purple / #d96570 pink) at low alpha,
+     so this reads as "this app's AI accent" rather than an arbitrary new palette, and
+     works in both themes since these are explicit rgb() stops, not theme tokens. Fixed
+     attachment so the glow doesn't scroll away with a tall page. */
+  background:
+    radial-gradient(1100px circle at 12% -10%, rgb(66 133 244 / 0.28), transparent 55%),
+    radial-gradient(900px circle at 100% 0%, rgb(155 114 203 / 0.24), transparent 50%),
+    radial-gradient(900px circle at 100% 100%, rgb(217 101 112 / 0.16), transparent 55%),
+    radial-gradient(800px circle at 0% 100%, rgb(246 173 55 / 0.12), transparent 55%),
+    var(--bg-canvas);
+  background-attachment: fixed;
+  color: var(--text-primary);
   font-family: var(--font-sans, ui-sans-serif), system-ui, sans-serif;
 }
 
 * {
-  border-color: var(--border);
+  border-color: var(--border-default);
+}
+
+/* One systematic focus-visible ring for every interactive element, including
+   card rows and links — previously only inputs had a focus ring
+   (focus:ring-2). Real Dialog/Popover/Tabs primitives (below) still layer
+   their own :focus-visible rules where a ring alone isn't enough context. */
+:focus-visible {
+  outline: 2px solid var(--accent-solid);
+  outline-offset: 2px;
 }
 
 /* Tailwind's preflight resets list-style/margins — restore them inside the Tiptap

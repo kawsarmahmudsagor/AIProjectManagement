@@ -4,6 +4,8 @@ from uuid import UUID
 from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
 from app.schemas.common import RichText
+from app.schemas.faq import LLMFAQItem
+from app.schemas.project_media import ProjectMediaRef
 
 
 class ProjectSection(BaseModel):
@@ -84,12 +86,29 @@ class ProjectOut(ProjectBase):
     id: UUID
     created_at: datetime
     updated_at: datetime
+    # Populated by routers/projects.py's _to_out() from a separately-queried
+    # ProjectMedia row (see services/project_media_service.py) — Project itself carries
+    # no media columns, see models/project_media.py's docstring on why.
+    thumbnail: ProjectMediaRef | None = None
+    video: ProjectMediaRef | None = None
+    # Populated by _to_out() from the latest succeeded FAQJob row (services/faq_service.
+    # get_latest_result) — always a list, never None, so the frontend's only check is
+    # "is it empty" (no separate "still generating" vs "nothing generated" state to
+    # render; both look identical: no FAQ section). See faq_job.py's docstring for why
+    # there is no Project.faq column.
+    faq: list[LLMFAQItem] = []
+    # Populated by _to_out() from services/video_frame_service.frames_by_project() —
+    # stills extracted from the project's uploaded video, empty when there is no video or
+    # extraction hasn't finished yet. See project_video_frame.py's docstring.
+    video_frames: list[ProjectMediaRef] = []
 
     model_config = {"from_attributes": True}
 
 
 class ProjectSummary(BaseModel):
-    """Dashboard card payload — deliberately small."""
+    """Dashboard/list card payload — deliberately small. thumbnail_url is a bare string
+    here rather than the full ProjectMediaRef: a list row only ever needs an <img src>
+    and nothing else, and this list endpoint should not pay for a per-row nested object."""
 
     id: UUID
     name: str
@@ -98,6 +117,9 @@ class ProjectSummary(BaseModel):
     end_date: date | None
     is_current: bool
     short_summary_text: str
+    technologies: list[str] = []
+    thumbnail_url: str | None = None
+    video_url: str | None = None
 
     model_config = {"from_attributes": True}
 

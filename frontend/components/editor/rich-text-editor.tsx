@@ -4,11 +4,15 @@ import { EditorContent, useEditor, useEditorState } from "@tiptap/react";
 import { useEffect, useRef } from "react";
 import { EditorToolbar, type ToolbarAiAction } from "@/components/editor/editor-toolbar";
 import { buildExtensions } from "@/components/editor/editor-extensions";
+import type { AiGlowState } from "@/lib/ai-glow";
 import { countPlain } from "@/lib/rich-text/count";
 import { cn } from "@/lib/utils";
 import type { RichText } from "@/lib/rich-text/types";
 
-export type AiGlowState = "idle" | "generating" | "applied";
+// Re-exported for existing call sites that import AiGlowState from here — the type now
+// lives in lib/ai-glow.ts so non-editor surfaces can use it without this module's Tiptap
+// dependency chain.
+export type { AiGlowState };
 
 export interface RichTextEditorProps {
   /** Current value. Only re-applied to the editor when `externalRevision` changes (see

@@ -64,7 +64,7 @@ async def get_project(db: AsyncSession, user_id: UUID, project_id: UUID) -> Proj
 
 
 async def list_projects(
-    db: AsyncSession, user_id: UUID, *, q: str | None, page: int, page_size: int
+    db: AsyncSession, user_id: UUID, *, q: str | None, page: int, page_size: int, technology: str | None = None
 ) -> tuple[list[Project], int]:
     query = select(Project).where(Project.user_id == user_id)
     count_query = select(func.count()).select_from(Project).where(Project.user_id == user_id)
@@ -73,6 +73,20 @@ async def list_projects(
         pattern = f"%{q}%"
         query = query.where(Project.name.ilike(pattern))
         count_query = count_query.where(Project.name.ilike(pattern))
+
+    if technology:
+        # Case-insensitive match against the free-text `technologies` array — filtered in
+        # Python rather than a correlated unnest() subquery, same reasoning and same
+        # documented scale assumption as agents/chat_tools.py's project_search tool
+        # (tens to low hundreds of rows per user). Pagination therefore also happens in
+        # Python for this branch, since the SQL-level LIMIT/OFFSET can't know the
+        # post-filter count in advance.
+        wanted = technology.lower()
+        all_rows = (await db.execute(query.order_by(Project.updated_at.desc()))).scalars().all()
+        matched = [p for p in all_rows if wanted in {t.lower() for t in p.technologies}]
+        total = len(matched)
+        start = (page - 1) * page_size
+        return matched[start : start + page_size], total
 
     total = (await db.execute(count_query)).scalar_one()
     query = query.order_by(Project.updated_at.desc()).offset((page - 1) * page_size).limit(page_size)

@@ -32,7 +32,7 @@ export function useChatStream({
   onFinalize,
 }: {
   sessionId: string | null;
-  onUserMessage: (content: string) => void;
+  onUserMessage: (content: string, attachmentIds: string[]) => void;
   onFinalize: () => void;
 }) {
   const [draft, setDraft] = useState<ChatDraft>({ status: "idle" });
@@ -57,17 +57,24 @@ export function useChatStream({
     setDraft({ status: "idle" });
   }
 
-  const send = async (content: string, provider?: ChatProvider) => {
-    if (!sessionId || !content.trim()) return;
+  const send = async (content: string, opts?: { attachmentIds?: string[]; provider?: ChatProvider }) => {
+    const attachmentIds = opts?.attachmentIds ?? [];
+    if (!sessionId || (!content.trim() && attachmentIds.length === 0)) return;
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
 
-    onUserMessage(content);
+    onUserMessage(content, attachmentIds);
     setDraft({ status: "streaming", text: "", tools: [] });
 
     try {
-      for await (const event of streamChatTurn({ sessionId, content, provider, signal: controller.signal })) {
+      for await (const event of streamChatTurn({
+        sessionId,
+        content,
+        provider: opts?.provider,
+        attachmentIds,
+        signal: controller.signal,
+      })) {
         switch (event.type) {
           case "token":
             setDraft((prev) => (prev.status === "streaming" ? { ...prev, text: prev.text + event.delta } : prev));
@@ -120,7 +127,16 @@ export function useChatStream({
     }
   };
 
+  /** Aborts the client-side fetch, but does NOT abort the server-side turn (it keeps
+   * streaming/persisting in the background — see frontend/DESIGN.md's note on this) —
+   * `onFinalize` still runs so the partially-persisted turn shows up once it lands. */
+  const stop = () => {
+    abortRef.current?.abort();
+    setDraft({ status: "idle" });
+    onFinalize();
+  };
+
   const dismissError = () => setDraft({ status: "idle" });
 
-  return { draft, send, dismissError };
+  return { draft, send, stop, dismissError };
 }

@@ -1,14 +1,20 @@
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import Settings, get_settings
 from app.core.database import get_db
 from app.core.deps import CurrentUser
+from app.core.ownership import ResourceNotFoundError, owned
+from app.ingest.extract import UnsupportedFormatError
+from app.models.chat_attachment import ChatAttachment, ChatAttachmentBlob
 from app.models.user import User
 from app.schemas.chat import (
+    ChatAttachmentOut,
     ChatMessageIn,
     ChatMessageOut,
     ChatSessionListResponse,
@@ -17,10 +23,44 @@ from app.schemas.chat import (
     ChatSSEEvent,
 )
 from app.services import chat_service
-from app.services.chat_service import ChatSessionNotFoundError
+from app.services.chat_service import (
+    AttachmentAlreadyUsedError,
+    AttachmentTooLargeError,
+    ChatSessionNotFoundError,
+    UnsupportedAttachmentFormatError,
+)
 from app.workers.settings import enqueue_compact_history, enqueue_generate_title
 
 router = APIRouter(prefix="/chat", tags=["chat"])
+
+
+def _to_attachment_out(attachment: ChatAttachment) -> ChatAttachmentOut:
+    return ChatAttachmentOut(
+        id=attachment.id,
+        filename=attachment.filename,
+        mime_type=attachment.mime_type,
+        size_bytes=attachment.size_bytes,
+        kind=attachment.kind,
+        # Bare path, no cache-buster needed — an attachment's bytes never change after
+        # creation (unlike project media's replace-in-place), so there's nothing to bust.
+        url=f"chat/attachments/{attachment.id}",
+        extracted_chars=len(attachment.extracted_text) if attachment.extracted_text else None,
+        text_truncated=attachment.text_truncated,
+    )
+
+
+def _to_message_out(message) -> ChatMessageOut:
+    return ChatMessageOut(
+        id=message.id,
+        role=message.role,
+        content=message.content,
+        tool_calls=message.tool_calls,
+        tool_call_id=message.tool_call_id,
+        tool_name=message.tool_name,
+        tool_result=message.tool_result,
+        created_at=message.created_at,
+        attachments=[_to_attachment_out(a) for a in message.attachments],
+    )
 
 
 @router.post("/sessions", response_model=ChatSessionOut, status_code=status.HTTP_201_CREATED)
@@ -89,7 +129,7 @@ async def get_messages(
     session_id: UUID, user: User = CurrentUser, db: AsyncSession = Depends(get_db)
 ) -> list[ChatMessageOut]:
     messages = await chat_service.get_session_messages(db, user.id, session_id)
-    return [ChatMessageOut.model_validate(m) for m in messages]
+    return [_to_message_out(m) for m in messages]
 
 
 @router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -109,7 +149,12 @@ async def post_message(
     async def event_source():
         try:
             async for event in chat_service.stream_turn(
-                db, user, session_id, payload.content, provider_override=payload.provider
+                db,
+                user,
+                session_id,
+                payload.content,
+                provider_override=payload.provider,
+                attachment_ids=payload.attachment_ids or None,
             ):
                 yield event.to_sse()
         except ChatSessionNotFoundError:
@@ -123,10 +168,73 @@ async def post_message(
         # yielded "done" so neither adds perceived latency to the turn itself.
         if await chat_service.needs_title_generation(db, user.id, session_id):
             await enqueue_generate_title(session_id)
-        if await chat_service.unsummarized_message_count(db, user.id, session_id) > chat_service.COMPACTION_THRESHOLD:
+        if await chat_service.should_compact(db, user, session_id):
             await enqueue_compact_history(session_id)
 
     # media_type must stay uncompressed end-to-end (no gzip middleware, no buffering
     # reverse proxy) or "streams live" silently becomes "arrives in one chunk" — see the
     # plan's Part F risk #5.
     return StreamingResponse(event_source(), media_type="text/event-stream")
+
+
+# --------------------------------------------------------------------------- attachments
+
+
+@router.post(
+    "/sessions/{session_id}/attachments", response_model=ChatAttachmentOut, status_code=status.HTTP_201_CREATED
+)
+async def upload_attachment(
+    session_id: UUID,
+    file: UploadFile = File(...),
+    user: User = CurrentUser,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> ChatAttachmentOut:
+    data = await file.read()
+    try:
+        attachment = await chat_service.save_attachment(
+            db,
+            user,
+            session_id,
+            filename=file.filename or "upload",
+            data=data,
+            max_image_bytes=settings.max_chat_image_size_mb * 1024 * 1024,
+            max_document_bytes=settings.max_upload_size_mb * 1024 * 1024,
+        )
+    except UnsupportedAttachmentFormatError as exc:
+        raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, {"code": exc.code, "message": exc.message}) from exc
+    except UnsupportedFormatError as exc:
+        raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, {"code": exc.code, "message": exc.message}) from exc
+    except AttachmentTooLargeError as exc:
+        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, str(exc)) from exc
+    return _to_attachment_out(attachment)
+
+
+@router.get("/attachments/{attachment_id}")
+async def get_attachment(
+    attachment_id: UUID, user: User = CurrentUser, db: AsyncSession = Depends(get_db)
+) -> Response:
+    stmt = owned(ChatAttachment, user.id).where(ChatAttachment.id == attachment_id)
+    attachment = (await db.execute(stmt)).scalar_one_or_none()
+    if attachment is None:
+        raise ResourceNotFoundError("Chat attachment", attachment_id)
+
+    blob_stmt = select(ChatAttachmentBlob.data).where(ChatAttachmentBlob.attachment_id == attachment_id)
+    data = (await db.execute(blob_stmt)).scalar_one_or_none()
+    return Response(
+        content=bytes(data) if data is not None else b"",
+        media_type=attachment.mime_type,
+        headers={"Content-Disposition": f'inline; filename="{attachment.filename}"'},
+    )
+
+
+@router.delete("/attachments/{attachment_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_attachment(
+    attachment_id: UUID, user: User = CurrentUser, db: AsyncSession = Depends(get_db)
+) -> None:
+    try:
+        deleted = await chat_service.delete_attachment(db, user.id, attachment_id)
+    except AttachmentAlreadyUsedError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    if not deleted:
+        raise ResourceNotFoundError("Chat attachment", attachment_id)

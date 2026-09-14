@@ -3,6 +3,14 @@
 
 export type RichText = { html: string; text: string };
 
+export type ProjectMediaRef = {
+  url: string;
+  mime_type: string;
+  size_bytes: number;
+  origin: "uploaded" | "generated";
+  generator: string | null;
+};
+
 export type ProjectSummary = {
   id: string;
   name: string;
@@ -11,11 +19,16 @@ export type ProjectSummary = {
   end_date: string | null;
   is_current: boolean;
   short_summary_text: string;
+  technologies: string[];
+  thumbnail_url: string | null;
+  video_url: string | null;
 };
 
 export type ProjectListResponse = { items: ProjectSummary[]; total: number };
 
 export type ProjectSection = { long: RichText; short: RichText };
+
+export type FaqItem = { question: string; answer: string };
 
 export type Project = {
   id: string;
@@ -30,6 +43,73 @@ export type Project = {
   project_url: string | null;
   created_at: string;
   updated_at: string;
+  thumbnail: ProjectMediaRef | null;
+  video: ProjectMediaRef | null;
+  // Auto-generated once at project creation (backend/app/services/faq_service.py) —
+  // always a list, never absent; empty means "nothing generated (yet)", not an error.
+  faq: FaqItem[];
+  // Stills extracted from `video` for the read-only detail-page carousel — empty when
+  // there's no video, or extraction hasn't finished yet.
+  video_frames: ProjectMediaRef[];
+};
+
+export type ThumbnailGenerationContext = {
+  name?: string;
+  role?: string;
+  technologies?: string[];
+  description_text?: string;
+  responsibilities_text?: string;
+};
+
+export type ThumbnailJobStatus = {
+  id: string;
+  status: JobStatus;
+  result: ProjectMediaRef | null;
+  error: ErrorDetail | null;
+};
+
+export type DashboardTechnology = { name: string; project_count: number };
+
+export type DashboardSummary = {
+  total_projects: number;
+  current_projects: number;
+  technologies: DashboardTechnology[];
+  distinct_technology_count: number;
+  primary_skills: string[];
+  secondary_skills: string[];
+  projects: ProjectSummary[];
+};
+
+export type SearchHitKind = "project" | "technology" | "task" | "app_feature";
+
+export type SearchHit = {
+  kind: SearchHitKind;
+  id: string;
+  title: string;
+  subtitle: string;
+  snippet: string;
+  href: string;
+  score: number;
+  meta: Record<string, unknown>;
+};
+
+export type SearchGroup = { kind: SearchHitKind; label: string; items: SearchHit[]; total: number };
+
+export type SearchResponse = { q: string; groups: SearchGroup[]; total: number };
+
+export type SearchAnswer = { answer: string; citations: SearchHit[] };
+
+export type ChatAttachmentKind = "image" | "document";
+
+export type ChatAttachment = {
+  id: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  kind: ChatAttachmentKind;
+  url: string;
+  extracted_chars: number | null;
+  text_truncated: boolean;
 };
 
 export type ProviderSetting = {
@@ -292,7 +372,10 @@ export type BragDocumentJob = {
   document_id: string;
   member_name: string;
   target_month: string;
+  // Always the effective content (the user's saved edit once one exists, else the
+  // original LLM draft) — `is_edited` says which, so the UI can offer "Reset changes".
   result: BragDocumentResult | null;
+  is_edited: boolean;
   hour_stats: HourStats | null;
   error_code: string | null;
   error_message: string | null;

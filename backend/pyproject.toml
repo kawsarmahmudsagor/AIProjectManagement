@@ -24,6 +24,7 @@ dependencies = [
     "langchain-google-genai>=2.1",
     "langchain-openai>=0.3",
     "langgraph>=0.2",
+    "tiktoken>=0.14",
     "pdfplumber>=0.11.10",
     "pypdf>=6.16",
     "docx2python>=3.1",
@@ -34,6 +35,13 @@ dependencies = [
     "jinja2>=3.1",
     "bleach>=6.1",
     "openpyxl>=3.1",
+    # Video-frame extraction for the project-page carousel (services/video_frame_service.py).
+    # Chosen over opencv-python-headless because av.open() decodes directly from an
+    # in-memory buffer — opencv's conventional bytes-decoding path needs a temp file
+    # first, which would break project_media.py's "video bytes never touch disk" design.
+    # Ships self-contained wheels (bundled FFmpeg libs), no system ffmpeg binary needed.
+    "av>=13.0",
+    "pillow>=10.4",
 ]
 
 [project.optional-dependencies]

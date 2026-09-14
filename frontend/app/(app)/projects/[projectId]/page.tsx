@@ -4,6 +4,7 @@ import { notFound } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, Badge } from "@/components/ui/card";
 import { DeleteProjectButton } from "@/components/projects/delete-project-button";
+import { VideoFrameCarousel } from "@/components/projects/video-frame-carousel";
 import { formatLongMonthYear as formatDate } from "@/lib/dates";
 import { serverApiFetch } from "@/lib/server-api";
 import type { Project, TaskListResponse } from "@/lib/types";
@@ -78,6 +79,12 @@ export default async function ProjectDetailPage({
         </a>
       )}
 
+      {project.video_frames.length > 0 && (
+        <div className="mt-6">
+          <VideoFrameCarousel frames={project.video_frames} />
+        </div>
+      )}
+
       {(project.description.long.html || project.description.short.html) && (
         <Card className="mt-6">
           <h2 className="mb-2 font-medium">Project Description</h2>
@@ -108,6 +115,20 @@ export default async function ProjectDetailPage({
             <Badge key={t}>{t}</Badge>
           ))}
         </div>
+      )}
+
+      {project.faq.length > 0 && (
+        <Card className="mt-6">
+          <h2 className="mb-2 font-medium">Frequently Asked Questions</h2>
+          <div className="space-y-4">
+            {project.faq.map((item, i) => (
+              <div key={i}>
+                <p className="text-sm font-medium">{item.question}</p>
+                <p className="mt-1 text-sm text-muted">{item.answer}</p>
+              </div>
+            ))}
+          </div>
+        </Card>
       )}
     </div>
   );

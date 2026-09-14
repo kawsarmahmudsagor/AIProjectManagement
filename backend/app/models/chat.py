@@ -93,3 +93,9 @@ class ChatMessage(Base, UUIDPk, Timestamps):
     tool_result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     session: Mapped["ChatSession"] = relationship(back_populates="messages", foreign_keys=[session_id])
+    # Eagerly loadable (via selectinload in chat_service.get_session_messages) — never
+    # lazy, since chat_service runs on an async session and a lazy load during
+    # ChatMessageOut.model_validate would raise MissingGreenlet.
+    attachments: Mapped[list["ChatAttachment"]] = relationship(  # noqa: F821
+        back_populates="message", foreign_keys="ChatAttachment.message_id"
+    )

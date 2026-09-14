@@ -18,35 +18,77 @@ Key facts this implementation depends on (verified Aug 2026, docs/RESEARCH.md §
 
 import base64
 import json
+from uuid import UUID
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
+from app.models.ai_provider_setting import ProviderName
 from app.models.user import AgentPersona
 from app.providers.base import (
     BragDocumentInput,
     BreakdownInput,
     ConnectionStatus,
     ExtractInput,
+    FAQPromptInput,
+    GeneratedImage,
     LLMProvider,
     ProviderError,
+    ThumbnailPromptInput,
 )
 from app.providers.prompts import (
     BRAG_DOCUMENT_SYSTEM_PROMPTS,
     BREAKDOWN_SYSTEM_PROMPTS,
     EXTRACTION_SYSTEM_PROMPTS,
+    FAQ_SYSTEM_PROMPTS,
+    POSTER_DESIGN_SYSTEM_PROMPT,
     REWRITE_SYSTEM_PROMPTS,
     build_brag_document_prompt,
     build_breakdown_prompt,
+    build_faq_prompt,
+    build_poster_design_prompt,
     build_rewrite_prompt,
 )
 from app.providers.schema_utils import simplify_for_gemini
+from app.services.usage_service import record_usage
 
 
 class GeminiProvider(LLMProvider):
-    def __init__(self, api_key: str, model: str = "gemini-3.5-flash"):
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "gemini-3.5-flash",
+        *,
+        db: AsyncSession | None = None,
+        user_id: UUID | None = None,
+        operation: str | None = None,
+    ):
         self._api_key = api_key
         self._model_name = model
+        # Present only when constructed via registry.get_provider — direct construction
+        # (ai_settings.py's test_connection) leaves these None, and _log_usage below
+        # no-ops in that case since test_connection never calls a logged method anyway.
+        self._db = db
+        self._user_id = user_id
+        self._operation = operation
+
+    @property
+    def model(self) -> str:
+        return self._model_name
+
+    async def _log_usage(self, response: AIMessage) -> None:
+        if self._db is None or self._user_id is None:
+            return
+        await record_usage(
+            self._db,
+            user_id=self._user_id,
+            provider=ProviderName.GEMINI,
+            model=self._model_name,
+            operation=self._operation or "unknown",
+            usage=getattr(response, "usage_metadata", None),
+        )
 
     def _chat(self, **extra) -> ChatGoogleGenerativeAI:
         # A fresh instance per call — these are cheap wrappers, no persistent connection,
@@ -85,6 +127,8 @@ class GeminiProvider(LLMProvider):
             code, retryable = _classify_error(exc)
             raise ProviderError(code, str(exc), retryable=retryable) from exc
 
+        await self._log_usage(response)
+
         finish_reason = (response.response_metadata or {}).get("finish_reason")
         if finish_reason == "MAX_TOKENS":
             raise ProviderError(
@@ -119,6 +163,8 @@ class GeminiProvider(LLMProvider):
         except Exception as exc:  # langchain wraps provider errors inconsistently across versions
             code, retryable = _classify_error(exc)
             raise ProviderError(code, str(exc), retryable=retryable) from exc
+
+        await self._log_usage(response)
 
         if not response.text:
             raise ProviderError("EMPTY_RESPONSE", "Gemini returned no content", retryable=True)
@@ -163,6 +209,8 @@ class GeminiProvider(LLMProvider):
             code, retryable = _classify_error(exc)
             raise ProviderError(code, str(exc), retryable=retryable) from exc
 
+        await self._log_usage(response)
+
         finish_reason = (response.response_metadata or {}).get("finish_reason")
         if finish_reason == "MAX_TOKENS":
             raise ProviderError(
@@ -201,6 +249,8 @@ class GeminiProvider(LLMProvider):
             code, retryable = _classify_error(exc)
             raise ProviderError(code, str(exc), retryable=retryable) from exc
 
+        await self._log_usage(response)
+
         finish_reason = (response.response_metadata or {}).get("finish_reason")
         if finish_reason == "MAX_TOKENS":
             raise ProviderError(
@@ -211,6 +261,95 @@ class GeminiProvider(LLMProvider):
         if not response.text:
             raise ProviderError("EMPTY_RESPONSE", "Gemini returned no content", retryable=True)
 
+        return json.loads(response.text)
+
+    async def generate_image(self, prompt: str, *, aspect_ratio: str = "16:9") -> GeneratedImage:
+        """Calls google-genai's native Imagen endpoint directly rather than through
+        LangChain — same precedent as test_connection() below ("langchain-google-genai
+        doesn't wrap it, so we drop to the underlying client"). The model id is a global
+        app setting (core/config.Settings.gemini_image_model), not a per-user choice like
+        self._model_name — set it to "" to hard-disable this path and always fall back to
+        the SVG poster (services/thumbnail_service.py)."""
+        image_model = get_settings().gemini_image_model
+        if not image_model:
+            raise ProviderError("IMAGE_GENERATION_UNSUPPORTED", "No image model is configured.")
+
+        from google import genai as _genai
+        from google.genai import types as _genai_types
+
+        try:
+            client = _genai.Client(api_key=self._api_key)
+            response = await client.aio.models.generate_images(
+                model=image_model,
+                prompt=prompt,
+                config=_genai_types.GenerateImagesConfig(
+                    number_of_images=1, aspect_ratio=aspect_ratio, output_mime_type="image/png"
+                ),
+            )
+        except Exception as exc:
+            code, retryable = _classify_error(exc)
+            message = str(exc).lower()
+            # google-genai raises a 404-shaped ClientError for a model id this account's
+            # tier doesn't have access to — _classify_error has no NOT_FOUND case (no
+            # other call in this codebase hits one), so remap it here to the specific
+            # code thumbnail_service treats as "fall back to the SVG poster" rather than
+            # failing the job outright.
+            if "not found" in message or "not_found" in message or "404" in message:
+                code, retryable = "IMAGE_GENERATION_UNSUPPORTED", False
+            raise ProviderError(code, str(exc), retryable=retryable) from exc
+
+        if not response.generated_images:
+            raise ProviderError("IMAGE_GENERATION_UNSUPPORTED", "The image model returned no image.")
+        image = response.generated_images[0].image
+        if not image.image_bytes:
+            raise ProviderError("IMAGE_GENERATION_UNSUPPORTED", "The image model returned no image bytes.")
+        return GeneratedImage(data=image.image_bytes, mime_type=image.mime_type or "image/png")
+
+    async def design_poster(
+        self, ctx: ThumbnailPromptInput, json_schema: dict, *, persona: AgentPersona
+    ) -> dict:
+        chat = self._chat(
+            response_mime_type="application/json",
+            response_schema=simplify_for_gemini(json_schema),
+            thinking_level="low",
+            max_output_tokens=2048,
+        )
+        try:
+            response = await chat.ainvoke(
+                [
+                    SystemMessage(content=POSTER_DESIGN_SYSTEM_PROMPT),
+                    HumanMessage(content=build_poster_design_prompt(ctx)),
+                ]
+            )
+        except Exception as exc:
+            code, retryable = _classify_error(exc)
+            raise ProviderError(code, str(exc), retryable=retryable) from exc
+
+        await self._log_usage(response)
+
+        if not response.text:
+            raise ProviderError("EMPTY_RESPONSE", "Gemini returned no content", retryable=True)
+        return json.loads(response.text)
+
+    async def generate_faq(self, ctx: FAQPromptInput, json_schema: dict, *, persona: AgentPersona) -> dict:
+        chat = self._chat(
+            response_mime_type="application/json",
+            response_schema=simplify_for_gemini(json_schema),
+            thinking_level="low",
+            max_output_tokens=2048,
+        )
+        try:
+            response = await chat.ainvoke(
+                [SystemMessage(content=FAQ_SYSTEM_PROMPTS[persona]), HumanMessage(content=build_faq_prompt(ctx))]
+            )
+        except Exception as exc:
+            code, retryable = _classify_error(exc)
+            raise ProviderError(code, str(exc), retryable=retryable) from exc
+
+        await self._log_usage(response)
+
+        if not response.text:
+            raise ProviderError("EMPTY_RESPONSE", "Gemini returned no content", retryable=True)
         return json.loads(response.text)
 
     def get_chat_model(self) -> ChatGoogleGenerativeAI:

@@ -4,6 +4,7 @@ import type {
   BragDocumentJob,
   BragDocumentJobListResponse,
   BragDocumentPreviewResponse,
+  BragDocumentResult,
 } from "@/lib/types";
 
 // The backend's preview endpoint reads .xlsx bytes directly via openpyxl (it bypasses the
@@ -32,4 +33,25 @@ export async function getBragDocumentJob(jobId: string): Promise<BragDocumentJob
 
 export async function cancelBragDocumentJob(jobId: string): Promise<BragDocumentJob> {
   return apiFetch<BragDocumentJob>(`brag-document-jobs/${jobId}/cancel`, { method: "POST" });
+}
+
+export async function deleteBragDocumentJob(jobId: string): Promise<void> {
+  return apiFetch<void>(`brag-document-jobs/${jobId}`, { method: "DELETE" });
+}
+
+// `result` is the whole edited document (text edits and/or removed bullets/groups) —
+// autosaved on every change, so this always sends the complete current shape rather
+// than a partial diff.
+export async function updateBragDocumentResult(
+  jobId: string,
+  result: BragDocumentResult,
+): Promise<BragDocumentJob> {
+  return apiFetch<BragDocumentJob>(`brag-document-jobs/${jobId}`, {
+    method: "PATCH",
+    body: JSON.stringify(result),
+  });
+}
+
+export async function resetBragDocumentEdits(jobId: string): Promise<BragDocumentJob> {
+  return apiFetch<BragDocumentJob>(`brag-document-jobs/${jobId}/reset`, { method: "POST" });
 }

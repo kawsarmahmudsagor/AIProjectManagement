@@ -1,15 +1,7 @@
 import Link from "next/link";
 import { Card } from "@/components/ui/card";
 import type { ChatSession } from "@/lib/chat";
-
-function formatTimestamp(iso: string) {
-  return new Date(iso).toLocaleString("en-US", {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
-}
+import { formatShortTimestamp } from "@/lib/dates";
 
 export function RecentConversationsCard({ sessions }: { sessions: ChatSession[] }) {
   return (
@@ -23,7 +15,7 @@ export function RecentConversationsCard({ sessions }: { sessions: ChatSession[] 
             {sessions.map((session) => (
               <li key={session.id} className="flex items-center justify-between gap-3 text-sm">
                 <span className="truncate text-foreground/90">{session.title}</span>
-                <span className="shrink-0 text-xs text-muted">{formatTimestamp(session.last_message_at)}</span>
+                <span className="shrink-0 text-xs text-muted">{formatShortTimestamp(session.last_message_at)}</span>
               </li>
             ))}
           </ul>

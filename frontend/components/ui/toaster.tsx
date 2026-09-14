@@ -36,8 +36,14 @@ export function ToasterProvider({ children }: { children: React.ReactNode }) {
   return (
     <ToastContext.Provider value={toast}>
       {children}
+      {/* right offset by --chat-inset, set on <html> by app-shell.tsx (this toast
+          container is a DOM sibling of AppShell's tree, not a descendant of it — see
+          that file's comment on why the variable has to live on a real ancestor of
+          both) so a toast never renders underneath the docked chat panel. Falls back to
+          0px on pages outside AppShell (e.g. auth), which never set the variable. */}
       <div
-        className="pointer-events-none fixed bottom-6 right-6 z-50 flex w-80 flex-col gap-2"
+        className="pointer-events-none fixed bottom-6 z-70 flex w-80 flex-col gap-2"
+        style={{ right: "calc(1.5rem + var(--chat-inset, 0px))" }}
         aria-live="polite"
       >
         {toasts.map((t) => (

@@ -5,6 +5,7 @@ via get_provider(), catch ProviderError explicitly plus a catch-all fallback so 
 turn never hangs the SSE stream half-open.
 """
 
+import hashlib
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Literal
@@ -13,27 +14,65 @@ from uuid import UUID
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.agents.chat_tools import TOOL_LABELS, build_tools
 from app.agents.chatbot_graph import stream_chat
 from app.agents.chatbot_graph import stringify_content as _stringify_content
 from app.core.ownership import ResourceNotFoundError, owned
+from app.ingest.extract import UnsupportedFormatError, ingest
+from app.ingest.media_sniff import UnsupportedMediaFormatError, sniff_image_mime_type
 from app.models.ai_provider_setting import ProviderName
 from app.models.chat import ChatMessage, ChatRole, ChatSession
+from app.models.chat_attachment import AttachmentKind, ChatAttachment, ChatAttachmentBlob
 from app.models.user import ChatProvider, User
 from app.providers.base import ProviderError
+from app.providers.catalog import context_window_for
+from app.providers.content_blocks import AttachmentPayload, build_user_content, image_placeholder_block
 from app.providers.prompts import (
     build_chatbot_system_prompt,
     build_compaction_prompt,
     build_title_generation_prompt,
 )
-from app.providers.registry import get_provider
+from app.providers.registry import get_provider, resolve_chat_model_name
+from app.providers.tokens import estimate_tokens
 from app.schemas.chat import ChatSSEEvent
+from app.services.breakdown_service import _UNSAFE_CHARS_RE
 from app.services.profile_service import build_context_digest
+from app.services.usage_service import record_usage
+
+# Per-attachment and per-turn caps on how much extracted document text gets injected as
+# chat context — a 200-page PDF's full text would dwarf the conversation itself.
+_MAX_ATTACHMENT_TEXT_CHARS = 100_000
+# The N most recent images in the replayed window are sent as real image blocks; older
+# ones become text placeholders (providers/content_blocks.image_placeholder_block). At
+# max_chat_image_size_mb=5 and a 10-message unsummarized window, an unbounded version
+# could hold 250MB of base64'd image data in one request — this is the sharpest edge of
+# storing chat attachment bytes in the DB rather than on disk.
+_MAX_REPLAYED_IMAGES = 4
+
+
+class UnsupportedAttachmentFormatError(Exception):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+class AttachmentTooLargeError(Exception):
+    pass
+
+
+class AttachmentAlreadyUsedError(Exception):
+    """Raised when deleting an attachment that's already bound to a persisted message —
+    see delete_attachment's docstring."""
 
 # Compaction thresholds for _build_history/compact_history below — see that function's
-# docstring for the rolling-summary design.
+# docstring for the rolling-summary design. COMPACTION_THRESHOLD is now only the
+# *fallback* trigger (see should_compact) — the primary trigger is token-based, sized
+# against the user's actual configured model's context window.
 COMPACTION_THRESHOLD = 50
+COMPACTION_TOKEN_FRACTION = 0.5
 _COMPACTION_KEEP_RECENT = 10
 
 
@@ -164,20 +203,113 @@ async def get_session_messages(db: AsyncSession, user_id: UUID, session_id: UUID
     await _get_owned_session(db, user_id, session_id)
     # Ordered by the monotonic `sequence` column, not created_at — see ChatMessage.sequence's
     # docstring for why created_at can't serve as a reliable ordering/tiebreak key here.
+    # selectinload, never lazy: this runs on an async session, and a lazy load during
+    # ChatMessageOut.model_validate would raise MissingGreenlet. It stays a metadata-only
+    # load — the blob table (ChatAttachmentBlob) has no relationship to eager-load, by
+    # models/chat_attachment.py's own rule.
     stmt = (
-        select(ChatMessage).where(ChatMessage.session_id == session_id).order_by(ChatMessage.sequence)
+        select(ChatMessage)
+        .where(ChatMessage.session_id == session_id)
+        .options(selectinload(ChatMessage.attachments))
+        .order_by(ChatMessage.sequence)
     )
     return list((await db.execute(stmt)).scalars().all())
 
 
-def _rows_to_messages(rows: list[ChatMessage]) -> list[BaseMessage]:
+async def _load_attachment_payloads(
+    db: AsyncSession, rows: list[ChatMessage], *, include_image_bytes: bool
+) -> dict[UUID, list[AttachmentPayload]]:
+    """Two queries for a whole history, never per-row: one for every user row's
+    attachment metadata (rows already carry it via get_session_messages' selectinload,
+    so this just reshapes it), one for the blobs of just the images that survive the
+    _MAX_REPLAYED_IMAGES cap. `include_image_bytes=False` (should_compact/compact_history's
+    call) skips the second query entirely — a token-estimate pass has no business paying
+    to load image bytes it will never encode."""
+    by_message: dict[UUID, list[AttachmentPayload]] = {}
+    all_attachments: list[ChatAttachment] = []
+    for row in rows:
+        if row.role != ChatRole.USER or not row.attachments:
+            continue
+        all_attachments.extend(row.attachments)
+
+    if not all_attachments:
+        return {}
+
+    image_ids_to_load: set[UUID] = set()
+    if include_image_bytes:
+        image_attachments = [a for a in all_attachments if a.kind == AttachmentKind.IMAGE]
+        # Most-recent-first across the whole history, capped — matches "the N most
+        # recent images survive" regardless of which message they're attached to.
+        for a in sorted(image_attachments, key=lambda a: a.created_at, reverse=True)[:_MAX_REPLAYED_IMAGES]:
+            image_ids_to_load.add(a.id)
+
+    blob_by_id: dict[UUID, bytes] = {}
+    if image_ids_to_load:
+        blob_stmt = select(ChatAttachmentBlob.attachment_id, ChatAttachmentBlob.data).where(
+            ChatAttachmentBlob.attachment_id.in_(image_ids_to_load)
+        )
+        for attachment_id, data in (await db.execute(blob_stmt)).all():
+            blob_by_id[attachment_id] = bytes(data)
+
+    for row in rows:
+        if row.role != ChatRole.USER or not row.attachments:
+            continue
+        payloads: list[AttachmentPayload] = []
+        for a in row.attachments:
+            if a.kind == AttachmentKind.IMAGE:
+                if a.id in blob_by_id:
+                    payloads.append(
+                        AttachmentPayload(id=a.id, filename=a.filename, mime_type=a.mime_type, kind=a.kind, data=blob_by_id[a.id])
+                    )
+                else:
+                    # Either include_image_bytes=False, or this image aged out of the
+                    # _MAX_REPLAYED_IMAGES window — represented as a placeholder further
+                    # down in build_user_content's caller, not here (this function only
+                    # reports what's loadable; content_blocks decides what to render).
+                    payloads.append(AttachmentPayload(id=a.id, filename=a.filename, mime_type=a.mime_type, kind=a.kind))
+            else:
+                payloads.append(
+                    AttachmentPayload(
+                        id=a.id, filename=a.filename, mime_type=a.mime_type, kind=a.kind,
+                        extracted_text=a.extracted_text, text_truncated=a.text_truncated,
+                    )
+                )
+        by_message[row.id] = payloads
+    return by_message
+
+
+def _rows_to_messages(
+    rows: list[ChatMessage], attachments: dict[UUID, list[AttachmentPayload]] | None = None
+) -> list[BaseMessage]:
     """Reconstructs the LangChain message sequence from persisted rows — a direct 1:1
     replay with no custom serialization format, since each row already mirrors exactly
-    one HumanMessage/AIMessage/ToolMessage (see models/chat.py's docstring)."""
+    one HumanMessage/AIMessage/ToolMessage (see models/chat.py's docstring).
+
+    `attachments` (from _load_attachment_payloads) makes the USER branch conditional:
+    with payloads in hand it reconstructs multimodal content via
+    providers/content_blocks.build_user_content; otherwise (the default, and the only
+    path should_compact/compact_history ever take — see their call sites) it falls back
+    to today's plain-string content, so a token-estimate pass never pays to load images
+    it will never encode."""
     messages: list[BaseMessage] = []
     for row in rows:
         if row.role == ChatRole.USER:
-            messages.append(HumanMessage(content=row.content))
+            payloads = (attachments or {}).get(row.id) or []
+            if not payloads:
+                messages.append(HumanMessage(content=row.content))
+                continue
+
+            # An image with no loaded bytes (either include_image_bytes=False upstream,
+            # or it aged out of _MAX_REPLAYED_IMAGES) becomes a text placeholder instead
+            # of silently vanishing from the replayed conversation.
+            missing_images = [p for p in payloads if p.kind == AttachmentKind.IMAGE and p.data is None]
+            real_payloads = [p for p in payloads if not (p.kind == AttachmentKind.IMAGE and p.data is None)]
+
+            content = build_user_content(row.content, real_payloads)
+            if missing_images:
+                placeholders = [image_placeholder_block(p.filename) for p in missing_images]
+                content = [*placeholders, *content] if isinstance(content, list) else [*placeholders, {"type": "text", "text": content}]
+            messages.append(HumanMessage(content=content))
         elif row.role == ChatRole.ASSISTANT:
             messages.append(AIMessage(content=row.content, tool_calls=row.tool_calls or []))
         else:  # ChatRole.TOOL
@@ -202,14 +334,21 @@ def _unsummarized_rows(session: ChatSession, rows: list[ChatMessage]) -> list[Ch
     return rows[boundary_index + 1 :] if boundary_index is not None else rows
 
 
-def _build_history(session: ChatSession, rows: list[ChatMessage]) -> list[BaseMessage]:
+def _build_history(
+    session: ChatSession, rows: list[ChatMessage], attachments: dict[UUID, list[AttachmentPayload]] | None = None
+) -> list[BaseMessage]:
     """Replays persisted rows into the LangChain message sequence sent to the LLM,
     applying rolling-summary compaction (see compact_history below): once
     session.summarized_through_message_id is set, only rows after that boundary are
     replayed, prefixed with one synthetic SystemMessage carrying session.context_summary.
     Rows in the DB and what the chat UI renders are untouched either way — this only
-    shrinks what's sent to the LLM as context."""
-    messages = _rows_to_messages(_unsummarized_rows(session, rows))
+    shrinks what's sent to the LLM as context.
+
+    `attachments` is None by default (should_compact never passes one — see its own
+    call to _rows_to_messages directly, not through here) and only ever populated by
+    stream_turn, which has a real provider in hand and needs the actual multimodal
+    content reconstructed."""
+    messages = _rows_to_messages(_unsummarized_rows(session, rows), attachments)
     if session.context_summary:
         messages = [
             SystemMessage(content=f"Summary of earlier conversation:\n\n{session.context_summary}"),
@@ -223,10 +362,96 @@ async def needs_title_generation(db: AsyncSession, user_id: UUID, session_id: UU
     return session.title == "New chat"
 
 
-async def unsummarized_message_count(db: AsyncSession, user_id: UUID, session_id: UUID) -> int:
-    session = await _get_owned_session(db, user_id, session_id)
-    rows = await get_session_messages(db, user_id, session_id)
-    return len(_unsummarized_rows(session, rows))
+async def should_compact(db: AsyncSession, user: User, session_id: UUID) -> bool:
+    """Token-based replacement for a flat message-count threshold: gates
+    compact_history on the estimated size of the unsummarized history relative to the
+    user's *actual* configured chat model's context window, so a chatty session with
+    large tool outputs (task lists, brag documents) compacts sooner than a plain-text
+    session of the same length would. Falls back to the flat COMPACTION_THRESHOLD
+    message count if the estimate or model lookup raises for any reason — a bug here
+    can only make compaction run more often, never stop it from running at all."""
+    session = await _get_owned_session(db, user.id, session_id)
+    rows = _unsummarized_rows(session, await get_session_messages(db, user.id, session_id))
+    if len(rows) <= _COMPACTION_KEEP_RECENT:
+        return False
+
+    try:
+        token_count = estimate_tokens(_rows_to_messages(rows))
+        provider_name = ProviderName(user.chat_provider.value)
+        model = await resolve_chat_model_name(db, user.id, provider_name)
+        budget = int(context_window_for(model) * COMPACTION_TOKEN_FRACTION)
+        return token_count > budget
+    except Exception:  # noqa: BLE001 — fall back rather than skip compaction entirely
+        return len(rows) > COMPACTION_THRESHOLD
+
+
+async def save_attachment(
+    db: AsyncSession, user: User, session_id: UUID, *, filename: str, data: bytes, max_image_bytes: int, max_document_bytes: int
+) -> ChatAttachment:
+    """Pre-uploaded before the message it belongs to exists (message_id stays NULL until
+    the turn is sent — see stream_turn's validation above) — see the plan's rationale for
+    why this is pre-upload-then-reference rather than a multipart message endpoint: a
+    retried/aborted SSE stream must not re-upload every byte, and FastAPI can't mix a
+    Pydantic JSON body with File(...) in one route anyway.
+
+    Tries image first, then falls back to ingest() (PDF/DOCX/text/code) — this is what
+    makes code/text files "just work" for free: sniff_mime_type's UTF-8 fallback accepts
+    any of .py/.ts/.json/.sql/.md with zero new code, and DOCX comes along the same way.
+    A scanned PDF (no extractable text) is accepted anyway, with an explicit
+    "no text could be extracted" marker at reconstruction time — silence there is what
+    makes a model hallucinate contents.
+    """
+    await _get_owned_session(db, user.id, session_id)
+
+    try:
+        mime_type = sniff_image_mime_type(data)
+        if len(data) > max_image_bytes:
+            raise AttachmentTooLargeError(f"Image exceeds the {max_image_bytes // (1024 * 1024)}MB limit")
+        attachment = ChatAttachment(
+            user_id=user.id, session_id=session_id, kind=AttachmentKind.IMAGE,
+            filename=filename[:255], mime_type=mime_type, size_bytes=len(data),
+            sha256=hashlib.sha256(data).hexdigest(),
+        )
+    except UnsupportedMediaFormatError:
+        if len(data) > max_document_bytes:
+            raise AttachmentTooLargeError(f"File exceeds the {max_document_bytes // (1024 * 1024)}MB limit") from None
+        try:
+            parsed = ingest(data, filename)
+        except UnsupportedFormatError as exc:
+            raise UnsupportedAttachmentFormatError(exc.code, exc.message) from exc
+
+        extracted = _UNSAFE_CHARS_RE.sub("", parsed.extracted_text or "")
+        truncated = len(extracted) > _MAX_ATTACHMENT_TEXT_CHARS
+        attachment = ChatAttachment(
+            user_id=user.id, session_id=session_id, kind=AttachmentKind.DOCUMENT,
+            filename=filename[:255], mime_type=parsed.mime_type, size_bytes=len(data),
+            sha256=hashlib.sha256(data).hexdigest(),
+            extracted_text=extracted[:_MAX_ATTACHMENT_TEXT_CHARS],
+            text_truncated=truncated,
+        )
+
+    db.add(attachment)
+    await db.flush()
+    db.add(ChatAttachmentBlob(attachment_id=attachment.id, data=data))
+    await db.commit()
+    await db.refresh(attachment)
+    return attachment
+
+
+async def delete_attachment(db: AsyncSession, user_id: UUID, attachment_id: UUID) -> bool:
+    """Idempotent (returns whether a row existed) like project_media_service.delete_media
+    — EXCEPT once message_id is set: deleting an attachment a persisted message already
+    replays would silently corrupt that message's history, so that case raises instead of
+    quietly succeeding or quietly no-op'ing."""
+    stmt = owned(ChatAttachment, user_id).where(ChatAttachment.id == attachment_id)
+    attachment = (await db.execute(stmt)).scalar_one_or_none()
+    if attachment is None:
+        return False
+    if attachment.message_id is not None:
+        raise AttachmentAlreadyUsedError("This attachment is already part of a sent message.")
+    await db.delete(attachment)
+    await db.commit()
+    return True
 
 
 async def stream_turn(
@@ -236,11 +461,38 @@ async def stream_turn(
     user_message: str,
     *,
     provider_override: ChatProvider | None = None,
+    attachment_ids: list[UUID] | None = None,
 ) -> AsyncIterator[ChatSSEEvent]:
     session = await _get_owned_session(db, user.id, session_id)
 
+    # Every id must belong to this user AND this session AND not already be bound to a
+    # different message — validated with one query, entirely before any message row is
+    # created, so a bad id 404s cleanly instead of persisting a half-formed turn.
+    if attachment_ids:
+        stmt = select(ChatAttachment).where(
+            ChatAttachment.id.in_(attachment_ids),
+            ChatAttachment.user_id == user.id,
+            ChatAttachment.session_id == session_id,
+            ChatAttachment.message_id.is_(None),
+        )
+        found = list((await db.execute(stmt)).scalars().all())
+        if len(found) != len(set(attachment_ids)):
+            yield ChatSSEEvent(
+                "error", {"code": "ATTACHMENT_NOT_FOUND", "message": "One of the attached files couldn't be found."}
+            )
+            return
+
     human_row = ChatMessage(session_id=session.id, role=ChatRole.USER, content=user_message)
     db.add(human_row)
+    await db.flush()  # assigns human_row.id without ending the transaction
+
+    if attachment_ids:
+        # Bound in the same commit as the message row itself (the flush above just
+        # allocates the id) — a crash between these two writes must never leave an
+        # attachment pointing at a message that doesn't exist, or vice versa.
+        for attachment in found:
+            attachment.message_id = human_row.id
+
     await db.commit()
     await db.refresh(human_row)
 
@@ -248,7 +500,9 @@ async def stream_turn(
         "session_meta", {"session_id": str(session.id), "user_message_id": str(human_row.id)}
     )
 
-    history = _build_history(session, await get_session_messages(db, user.id, session_id))
+    rows = await get_session_messages(db, user.id, session_id)
+    attachment_payloads = await _load_attachment_payloads(db, rows, include_image_bytes=True)
+    history = _build_history(session, rows, attachment_payloads)
 
     chat_provider = provider_override or user.chat_provider
     new_messages: list[BaseMessage] = []
@@ -294,6 +548,16 @@ async def stream_turn(
                 )
             elif graph_event["type"] == "final":
                 new_messages = graph_event["messages"]
+                for usage in graph_event.get("usage", []):
+                    await record_usage(
+                        db,
+                        user_id=user.id,
+                        session_id=session.id,
+                        provider=ProviderName(chat_provider.value),
+                        model=provider.model,
+                        operation="chat",
+                        usage=usage,
+                    )
     except ProviderError as exc:
         yield ChatSSEEvent("error", {"code": exc.code, "message": exc.message})
         return
@@ -358,11 +622,21 @@ async def generate_session_title(db: AsyncSession, session_id: UUID) -> None:
         return
 
     try:
-        provider = await get_provider(db, user.id, ProviderName(user.chat_provider.value), purpose="chat")
+        provider = await get_provider(db, user.id, ProviderName(user.chat_provider.value), purpose="chat_title")
         prompt = build_title_generation_prompt(first_user.content, first_assistant.content)
         response = await provider.get_chat_model().ainvoke([HumanMessage(content=prompt)])
     except Exception:  # noqa: BLE001 — a failed background title-gen must never crash the job
         return
+
+    await record_usage(
+        db,
+        user_id=user.id,
+        session_id=session.id,
+        provider=ProviderName(user.chat_provider.value),
+        model=provider.model,
+        operation="chat_title",
+        usage=getattr(response, "usage_metadata", None),
+    )
 
     title = _stringify_content(response.content).strip().strip('"').strip("'")
     if not title:
@@ -398,11 +672,23 @@ async def compact_history(db: AsyncSession, session_id: UUID) -> None:
         return
 
     try:
-        provider = await get_provider(db, user.id, ProviderName(user.chat_provider.value), purpose="chat")
+        provider = await get_provider(
+            db, user.id, ProviderName(user.chat_provider.value), purpose="chat_compaction"
+        )
         prompt = build_compaction_prompt(session.context_summary, transcript_text)
         response = await provider.get_chat_model().ainvoke([HumanMessage(content=prompt)])
     except Exception:  # noqa: BLE001 — a failed background compaction must never crash the job
         return
+
+    await record_usage(
+        db,
+        user_id=user.id,
+        session_id=session.id,
+        provider=ProviderName(user.chat_provider.value),
+        model=provider.model,
+        operation="chat_compaction",
+        usage=getattr(response, "usage_metadata", None),
+    )
 
     summary = _stringify_content(response.content).strip()
     if not summary:

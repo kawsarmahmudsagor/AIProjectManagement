@@ -347,9 +347,12 @@ def build_tools(db: AsyncSession, user_id: UUID) -> list[BaseTool]:
         `project_name` narrows to one project (partial, case-insensitive match) — ask the
         user which project if it's ambiguous or they didn't say. `description` is your own
         clear write-up of the work to break down, based on what the user told you in this
-        conversation (chat has no way to attach a document — if the user instead wants to
-        break down an uploaded spec/document, tell them to use the AI work breakdown
-        button on that project's task page). This only DRAFTS a proposal — nothing is
+        conversation — including the text of any document they attached to a chat message
+        (attachments are already part of this conversation's content by the time you see
+        it). If the user instead wants the document permanently stored against the
+        project with a resumable, cancellable job (rather than a one-off chat mention),
+        tell them to use the AI work breakdown button on that project's task page
+        instead. This only DRAFTS a proposal — nothing is
         created yet. Returns each proposed task (ref, title, description, priority,
         estimate_size, whether it's grounded in the description or your own suggestion)
         plus a job_id. Show the proposal to the user and ask which tasks they want kept

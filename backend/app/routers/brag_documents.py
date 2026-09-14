@@ -135,6 +135,7 @@ async def create_brag_document(
 
 
 def _to_out(job: BragDocumentJob) -> BragDocumentJobOut:
+    effective_result = job.effective_result
     return BragDocumentJobOut(
         id=job.id,
         name=job.name,
@@ -142,7 +143,8 @@ def _to_out(job: BragDocumentJob) -> BragDocumentJobOut:
         document_id=job.document_id,
         member_name=job.member_name,
         target_month=job.target_month,
-        result=LLMBragDocumentResult.model_validate(job.result) if job.result else None,
+        result=LLMBragDocumentResult.model_validate(effective_result) if effective_result else None,
+        is_edited=job.edited_result is not None,
         hour_stats=HourStatsOut.model_validate(job.hour_stats) if job.hour_stats else None,
         error_code=job.error_code,
         error_message=job.error_message,
@@ -191,6 +193,56 @@ async def get_brag_document_job(
 ) -> BragDocumentJobOut:
     job = await require_owned(db, BragDocumentJob, job_id, user.id, resource="Brag document job")
     return _to_out(job)
+
+
+@brag_document_jobs_router.patch("/{job_id}", response_model=BragDocumentJobOut)
+async def update_brag_document_result(
+    job_id: UUID,
+    payload: LLMBragDocumentResult,
+    user: User = CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> BragDocumentJobOut:
+    """Saves the user's manually-edited version of the drafted document (text edits,
+    and/or removed bullets/groups/impact areas) — the whole edited shape is sent and
+    replaces any previous edit whole-sale, same as autosaving a document. Never touches
+    `result` itself; see BragDocumentJob.edited_result's docstring."""
+    job = await require_owned(db, BragDocumentJob, job_id, user.id, resource="Brag document job")
+    if job.status != JobStatus.SUCCEEDED:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "This brag document hasn't finished generating yet."
+        )
+    job.edited_result = payload.model_dump()
+    await db.commit()
+    await db.refresh(job)
+    return _to_out(job)
+
+
+@brag_document_jobs_router.post("/{job_id}/reset", response_model=BragDocumentJobOut)
+async def reset_brag_document_edits(
+    job_id: UUID, user: User = CurrentUser, db: AsyncSession = Depends(get_db)
+) -> BragDocumentJobOut:
+    """Discards every saved edit, reverting the effective result back to the original
+    LLM draft in `result` — a plain "set edited_result back to NULL", nothing to
+    validate since `result` itself was never touched."""
+    job = await require_owned(db, BragDocumentJob, job_id, user.id, resource="Brag document job")
+    job.edited_result = None
+    await db.commit()
+    await db.refresh(job)
+    return _to_out(job)
+
+
+@brag_document_jobs_router.delete("/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_brag_document_job(
+    job_id: UUID, user: User = CurrentUser, db: AsyncSession = Depends(get_db)
+) -> None:
+    job = await require_owned(db, BragDocumentJob, job_id, user.id, resource="Brag document job")
+    if job.status in _CANCELLABLE:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "This brag document is still generating — cancel it before deleting, or wait for it to finish.",
+        )
+    await db.delete(job)
+    await db.commit()
 
 
 @brag_document_jobs_router.post("/{job_id}/cancel", response_model=BragDocumentJobOut)

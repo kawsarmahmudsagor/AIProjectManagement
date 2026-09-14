@@ -138,7 +138,12 @@ class BragDocumentJobOut(BaseModel):
     document_id: UUID
     member_name: str
     target_month: str
+    # Always the *effective* content (the user's saved edit once one exists, else the
+    # original LLM draft) — see BragDocumentJob.effective_result. The frontend never
+    # sees the raw/edited split; `is_edited` is only so it knows whether to offer
+    # "Reset changes".
     result: LLMBragDocumentResult | None
+    is_edited: bool
     hour_stats: HourStatsOut | None
     error_code: str | None
     error_message: str | None

@@ -1,9 +1,24 @@
 "use client";
 
-import { Copy, Download, FileText } from "lucide-react";
+import { Copy, Download, FileText, RotateCcw } from "lucide-react";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { EditableLine, EditableParagraph } from "@/components/brag-documents/editable-field";
+import {
+  removeFlatBullet,
+  removeGroup,
+  removeImpactArea,
+  removeSubsection,
+  setFlatBullet,
+  setGroupBullet,
+  setGroupField,
+  setImpactField,
+  setSubsectionBullet,
+  setSubsectionHeading,
+} from "@/components/brag-documents/edit-helpers";
+import { RemoveIconButton } from "@/components/brag-documents/remove-icon-button";
+import { useResetBragDocumentEdits, useUpdateBragDocumentResult } from "@/hooks/use-brag-document-job";
 import type {
   BragDocumentJob,
   BragDocumentResult as BragDocumentResultData,
@@ -116,8 +131,60 @@ function HourStatsCard({ job }: { job: BragDocumentJob }) {
   );
 }
 
+/** A list of bullet lines, editable text plus an optional per-line remove button.
+ * `onRemove` is only passed for the flat top-level sections (Team Support, Learning),
+ * where one bullet line *is* the removable unit — omitted for bullets nested inside a
+ * Technical Contribution project group or sub-theme, where the group/sub-theme itself
+ * is the removable "tile" instead (see RemoveIconButton's other call sites below), not
+ * its individual bullets. */
+function EditableBulletList({
+  bullets,
+  itemLabel,
+  onEdit,
+  onRemove,
+}: {
+  bullets: string[];
+  itemLabel?: string;
+  onEdit: (idx: number, value: string) => void;
+  onRemove?: (idx: number) => void;
+}) {
+  if (bullets.length === 0) {
+    return <p className="text-sm text-muted">Nothing drafted for this section.</p>;
+  }
+  return (
+    <ul className="space-y-1">
+      {bullets.map((bullet, i) => (
+        <li key={i} className="flex items-start gap-1 before:mt-2.5 before:size-1 before:shrink-0 before:rounded-full before:bg-muted">
+          <EditableParagraph value={bullet} onCommit={(v) => onEdit(i, v)} className="flex-1" />
+          {onRemove && <RemoveIconButton label={itemLabel ?? "this bullet"} onConfirm={() => onRemove(i)} />}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 export function BragDocumentResult({ job }: { job: BragDocumentJob }) {
-  const result = job.result;
+  const [result, setResult] = useState(job.result);
+  // Render-phase resync, only when switching to a different document (same "adjusting
+  // state when a prop changes" technique as ConfirmPopover's prevOpen, and
+  // EditableLine/EditableParagraph's prevValue) — keyed on job.id specifically, not
+  // job.result, since our own edits already keep local state and the server in
+  // agreement and re-syncing on every job.result change would risk clobbering an
+  // in-progress edit with a stale round-trip response.
+  const [prevJobId, setPrevJobId] = useState(job.id);
+  if (prevJobId !== job.id) {
+    setPrevJobId(job.id);
+    setResult(job.result);
+  }
+
+  const updateMutation = useUpdateBragDocumentResult(job.id);
+  const resetMutation = useResetBragDocumentEdits(job.id);
+
+  function persist(next: BragDocumentResultData) {
+    setResult(next);
+    updateMutation.mutate(next);
+  }
+
   if (!result) {
     return <p className="text-sm text-muted">This job succeeded but has no result to show.</p>;
   }
@@ -131,9 +198,28 @@ export function BragDocumentResult({ job }: { job: BragDocumentJob }) {
           <h1 className="text-xl font-semibold">
             {job.member_name} — {job.target_month}
           </h1>
-          <p className="text-sm text-muted">Review each section below — copy what you need into the ERP.</p>
+          <p className="text-sm text-muted">
+            Edit any text below. Remove a whole project, sub-theme, or impact area, or an
+            individual Team Support / Learning bullet — changes save automatically.
+          </p>
         </div>
-        <CopyButton text={fullText} label="Copy All" />
+        <div className="flex shrink-0 items-center gap-2">
+          {updateMutation.isPending && <span className="text-xs text-muted">Saving…</span>}
+          {job.is_edited && (
+            <Button
+              type="button"
+              variant="ghost"
+              className="h-8 px-2 text-xs"
+              disabled={resetMutation.isPending}
+              onClick={() =>
+                resetMutation.mutate(undefined, { onSuccess: (fresh) => setResult(fresh.result) })
+              }
+            >
+              <RotateCcw size={13} /> {resetMutation.isPending ? "Resetting…" : "Reset changes"}
+            </Button>
+          )}
+          <CopyButton text={fullText} label="Copy All" />
+        </div>
       </div>
 
       <HourStatsCard job={job} />
@@ -151,70 +237,108 @@ export function BragDocumentResult({ job }: { job: BragDocumentJob }) {
         {result.technical_contributions.length === 0 && (
           <p className="text-sm text-muted">No technical contributions were drafted.</p>
         )}
-        {result.technical_contributions.map((group) => (
-          <div key={group.project_name} className="space-y-2 rounded-lg border border-border p-3">
+        {result.technical_contributions.map((group, groupIdx) => (
+          <div key={groupIdx} className="space-y-2 rounded-lg border border-border p-3">
             <div className="flex items-center justify-between gap-3">
-              <p className="text-sm font-medium">{group.project_name}</p>
-              <CopyButton text={groupText(group)} />
+              <EditableLine
+                value={group.project_name}
+                onCommit={(v) => persist(setGroupField(result, groupIdx, "project_name", v))}
+                className="font-medium"
+              />
+              <div className="flex shrink-0 items-center gap-1">
+                <CopyButton text={groupText(group)} />
+                <RemoveIconButton
+                  label={`the "${group.project_name || "untitled"}" project group`}
+                  onConfirm={() => persist(removeGroup(result, groupIdx))}
+                />
+              </div>
             </div>
-            {group.subsections.map((sub, i) => (
-              <div key={i} className="space-y-1">
-                <p className="text-xs font-medium text-muted">{sub.heading}</p>
-                <ul className="list-disc space-y-1 pl-5 text-sm">
-                  {sub.bullets.map((bullet, j) => (
-                    <li key={j}>{bullet}</li>
-                  ))}
-                </ul>
+            {group.subsections.map((sub, subIdx) => (
+              <div key={subIdx} className="space-y-1">
+                <div className="flex items-center justify-between gap-2">
+                  <EditableLine
+                    value={sub.heading}
+                    onCommit={(v) => persist(setSubsectionHeading(result, groupIdx, subIdx, v))}
+                    className="text-xs font-medium text-muted"
+                  />
+                  <RemoveIconButton
+                    label={`the "${sub.heading || "untitled"}" sub-theme`}
+                    onConfirm={() => persist(removeSubsection(result, groupIdx, subIdx))}
+                  />
+                </div>
+                <div className="pl-5">
+                  <EditableBulletList
+                    bullets={sub.bullets}
+                    onEdit={(i, v) => persist(setSubsectionBullet(result, groupIdx, subIdx, i, v))}
+                  />
+                </div>
               </div>
             ))}
             {group.bullets.length > 0 && (
-              <ul className="list-disc space-y-1 pl-5 text-sm">
-                {group.bullets.map((bullet, i) => (
-                  <li key={i}>{bullet}</li>
-                ))}
-              </ul>
+              <div className="pl-5">
+                <EditableBulletList
+                  bullets={group.bullets}
+                  onEdit={(i, v) => persist(setGroupBullet(result, groupIdx, i, v))}
+                />
+              </div>
             )}
-            {group.key_contribution && (
-              <p className="rounded-md bg-surface-2/30 px-2 py-1.5 text-xs italic text-muted">
-                Key Contribution: {group.key_contribution}
-              </p>
-            )}
+            <div className="rounded-md bg-surface-2/30 px-2 py-1.5">
+              <p className="text-xs italic text-muted">Key Contribution:</p>
+              <EditableParagraph
+                value={group.key_contribution}
+                onCommit={(v) => persist(setGroupField(result, groupIdx, "key_contribution", v))}
+                placeholder="No key contribution summary"
+                className="text-xs italic text-muted"
+              />
+            </div>
           </div>
         ))}
       </Card>
 
-      {result.overall_impact.length > 0 && (
-        <Card className="space-y-2">
-          <div className="flex items-center justify-between gap-3">
-            <h2 className="font-medium">Overall Impact</h2>
-            <CopyButton
-              text={bulletsToText(result.overall_impact.map((a) => `${a.category}: ${a.summary}`))}
-            />
-          </div>
-          <ul className="list-disc space-y-1 pl-5 text-sm">
+      <Card className="space-y-2">
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="font-medium">Overall Impact</h2>
+          <CopyButton
+            text={bulletsToText(result.overall_impact.map((a) => `${a.category}: ${a.summary}`))}
+          />
+        </div>
+        {result.overall_impact.length === 0 ? (
+          <p className="text-sm text-muted">Nothing drafted for this section.</p>
+        ) : (
+          <ul className="space-y-1">
             {result.overall_impact.map((area, i) => (
-              <li key={i}>
-                <span className="font-medium">{area.category}:</span> {area.summary}
+              <li key={i} className="flex items-start gap-2">
+                <EditableLine
+                  value={area.category}
+                  onCommit={(v) => persist(setImpactField(result, i, "category", v))}
+                  className="w-40 shrink-0 font-medium"
+                />
+                <EditableParagraph
+                  value={area.summary}
+                  onCommit={(v) => persist(setImpactField(result, i, "summary", v))}
+                  className="flex-1"
+                />
+                <RemoveIconButton
+                  label={`the "${area.category || "untitled"}" impact area`}
+                  onConfirm={() => persist(removeImpactArea(result, i))}
+                />
               </li>
             ))}
           </ul>
-        </Card>
-      )}
+        )}
+      </Card>
 
       <Card className="space-y-2">
         <div className="flex items-center justify-between gap-3">
           <h2 className="font-medium">Team Support &amp; Collaboration</h2>
           <CopyButton text={sectionText("Team Support & Collaboration", result.team_support_bullets)} />
         </div>
-        {result.team_support_bullets.length === 0 ? (
-          <p className="text-sm text-muted">Nothing drafted for this section.</p>
-        ) : (
-          <ul className="list-disc space-y-1 pl-5 text-sm">
-            {result.team_support_bullets.map((bullet, i) => (
-              <li key={i}>{bullet}</li>
-            ))}
-          </ul>
-        )}
+        <EditableBulletList
+          bullets={result.team_support_bullets}
+          itemLabel="this bullet"
+          onEdit={(i, v) => persist(setFlatBullet(result, "team_support_bullets", i, v))}
+          onRemove={(i) => persist(removeFlatBullet(result, "team_support_bullets", i))}
+        />
       </Card>
 
       <Card className="space-y-2">
@@ -222,15 +346,12 @@ export function BragDocumentResult({ job }: { job: BragDocumentJob }) {
           <h2 className="font-medium">Learning &amp; Development</h2>
           <CopyButton text={sectionText("Learning & Development", result.learning_bullets)} />
         </div>
-        {result.learning_bullets.length === 0 ? (
-          <p className="text-sm text-muted">Nothing drafted for this section.</p>
-        ) : (
-          <ul className="list-disc space-y-1 pl-5 text-sm">
-            {result.learning_bullets.map((bullet, i) => (
-              <li key={i}>{bullet}</li>
-            ))}
-          </ul>
-        )}
+        <EditableBulletList
+          bullets={result.learning_bullets}
+          itemLabel="this bullet"
+          onEdit={(i, v) => persist(setFlatBullet(result, "learning_bullets", i, v))}
+          onRemove={(i) => persist(removeFlatBullet(result, "learning_bullets", i))}
+        />
       </Card>
 
       <div className="flex justify-end gap-2">

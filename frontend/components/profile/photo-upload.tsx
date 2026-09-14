@@ -4,16 +4,24 @@ import { Trash2, Upload, UserRound } from "lucide-react";
 import { useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { ApiError } from "@/lib/api-client";
+import { mediaUrl } from "@/lib/media-url";
 import { deleteProfilePhoto, uploadProfilePhoto } from "@/lib/profile";
 
 /** Upload/remove happen immediately (not part of the form's batched Save Changes) —
  * matches the reference mockup, where the photo buttons sit apart from the rest of the
- * form fields. */
+ * form fields.
+ *
+ * `initialUrl`/`result.photo_url` are bare backend paths (e.g. "profile/photo"), not
+ * full URLs — resolved through mediaUrl() at render time, same convention as every new
+ * media surface (see lib/media-url.ts's docstring for the bug this fixes). */
 export function PhotoUpload({ initialUrl }: { initialUrl: string | null }) {
-  const [url, setUrl] = useState(initialUrl);
+  const [path, setPath] = useState(initialUrl);
+  const [cacheBust, setCacheBust] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  const url = path ? `${mediaUrl(path)}${cacheBust ? `?t=${cacheBust}` : ""}` : null;
 
   const onFileChange = async (file: File | undefined) => {
     if (!file) return;
@@ -21,7 +29,8 @@ export function PhotoUpload({ initialUrl }: { initialUrl: string | null }) {
     setError(null);
     try {
       const result = await uploadProfilePhoto(file);
-      setUrl(`${result.photo_url}?t=${Date.now()}`);
+      setPath(result.photo_url);
+      setCacheBust(Date.now());
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not upload photo");
     } finally {
@@ -34,7 +43,7 @@ export function PhotoUpload({ initialUrl }: { initialUrl: string | null }) {
     setError(null);
     try {
       await deleteProfilePhoto();
-      setUrl(null);
+      setPath(null);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not remove photo");
     } finally {

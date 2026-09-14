@@ -32,20 +32,36 @@ backend/
     │   ├── project.py
     │   ├── task.py                 Task, TaskStatus/Priority/Source — see §2
     │   ├── document.py
-    │   ├── extraction_job.py       also exports the shared job_status_enum, reused by breakdown_job.py
+    │   ├── extraction_job.py       also exports the shared job_status_enum, reused by
+    │   │                            breakdown_job.py and thumbnail_job.py
     │   ├── breakdown_job.py        BreakdownJob — see §2
     │   ├── ai_provider_setting.py
     │   ├── chat.py                 ChatSession, ChatMessage, ChatRole — see §2, Jarvis plan.md Part A/G
+    │   ├── chat_attachment.py      ChatAttachment (metadata) + ChatAttachmentBlob (bytes) — see §2,
+    │   │                            Part 5 of the dashboard/chat/media plan (`plans/dashboard-*.md`)
     │   ├── profile.py              UserProfile — see §2, plan.md Part E
+    │   ├── project_media.py        ProjectMedia (metadata) + ProjectMediaBlob (bytes) — see §2;
+    │   │                            deliberately no relationship() between the two, see §2
+    │   ├── thumbnail_job.py        ThumbnailJob — reuses job_status_enum, see §2/§4
     │   ├── github_repo_cache.py    shared cross-user GitHub-result cache — plan.md Part H
     │   └── repo_suggestion.py      per-user suggested-repo log — plan.md Part H
     ├── schemas/                  Pydantic request/response models
     │   ├── common.py              RichText, PageParams
     │   ├── auth.py  project.py  task.py  document.py  job.py  breakdown.py  ai_settings.py
     │   ├── chat.py  profile.py  suggestion.py
+    │   ├── project_media.py       ProjectMediaOut, ProjectMediaRef (bare-path url + mime/size/origin/generator)
+    │   ├── thumbnail.py            ThumbnailJobOut, poster-spec schema for the SVG fallback
+    │   ├── search.py               SearchHit (uniform across projects/technologies/tasks/app_features)
+    │   └── dashboard.py            DashboardSummary
     ├── routers/                  one router per resource, included in main.py
     │   ├── auth.py  projects.py  tasks.py  documents.py  jobs.py  breakdown.py
     │   ├── ai.py  ai_settings.py  export.py  chat.py  profile.py  suggestions.py
+    │   ├── project_media.py        media CRUD + Range streaming; thumbnail-generation trigger —
+    │   │                            two routers (`router` + a second mount for `/thumbnail-jobs`),
+    │   │                            same split-router pattern as tasks.py's `router`/`tasks_router`
+    │   ├── thumbnails.py           GET /thumbnail-jobs/{id} — mounted separately from project_media.py
+    │   ├── search.py                GET /search (fast ILIKE), POST /search/ask (grounded LLM)
+    │   └── dashboard.py             GET /dashboard/summary
     ├── services/                 business logic, framework-agnostic where possible
     │   ├── project_service.py
     │   ├── task_service.py         CRUD, ownership + depth-cap validation, position/reorder math
@@ -54,38 +70,77 @@ backend/
     │   ├── extraction_service.py  orchestrates ingest -> provider -> persist job result
     │   ├── export_service.py
     │   ├── chat_service.py         session lifecycle, SSE turn orchestration, title-gen,
-    │   │                            history compaction — see §6, plan.md Part B/G
+    │   │                            history compaction, attachment save/replay — see §6, plan.md
+    │   │                            Part B/G and the dashboard/chat/media plan's Part 5
     │   ├── profile_service.py      profile CRUD, photo storage, enhance orchestration,
     │   │                            build_context_digest() for Jarvis — plan.md Part E
     │   ├── portfolio_service.py    technology-frequency aggregation, shared by the
-    │   │                            portfolio_analysis tool and the suggestion job
+    │   │                            portfolio_analysis tool, the suggestion job, and search_service —
+    │   │                            split into a pure `technology_frequency_from_projects(projects)`
+    │   │                            plus the async DB-reading wrapper so dashboard_service can reuse
+    │   │                            a project list it already loaded instead of re-querying
     │   ├── github_service.py       live GitHub repo search — shared by github_search
     │   │                            and the suggestion job's cache layer
     │   ├── github_cache_service.py TTL cache + call-pacing wrapper around github_service
-    │   └── suggestion_service.py   proactive-suggestion computation, dismissal, no-repeat
-    │                                log shared with chat_tools.github_search — plan.md Part H
+    │   ├── suggestion_service.py   proactive-suggestion computation, dismissal, no-repeat
+    │   │                            log shared with chat_tools.github_search — plan.md Part H
+    │   ├── project_media_service.py  replace_media() (delete-then-insert in one transaction),
+    │   │                            iter_blob() (Range-aware chunked substring reads, opens its
+    │   │                            OWN session — see §2/§6 on streaming session lifetime),
+    │   │                            media_by_project() (batched metadata for a whole page)
+    │   ├── thumbnail_service.py    has_sufficient_context(), run_thumbnail_job (image-model attempt
+    │   │                            -> SVG-poster fallback on specific error codes) — see §4
+    │   ├── poster_renderer.py      normalize_poster_spec() (never raises, repairs malformed specs)
+    │   │                            + render_poster_svg() (deterministic, seeded, escapes all text)
+    │   ├── search_service.py       ILIKE search across projects/technologies/tasks/app_features,
+    │   │                            Python-side scoring by matched field (same "small candidate
+    │   │                            set, score in Python" call as portfolio_service's counting)
+    │   └── dashboard_service.py    one query pass -> DashboardSummary (total/current projects,
+    │                                ranked technologies, profile skills kept distinct from derived
+    │                                technologies, project summaries incl. media refs)
+    ├── search/                   (new top-level package, not a "services" module — see §3/§4)
+    │   └── app_features.py         hand-written {slug,title,path,description,keywords,
+    │                                guide_section} registry for "Pages & features" search hits;
+    │                                a test asserts every chat_app_guide.md `##` heading is cited
+    │                                by some entry's guide_section, so an unregistered feature
+    │                                section fails CI instead of quietly becoming unsearchable
     ├── providers/                 the AI abstraction — see §4
     │   ├── base.py                 Protocol: extract(), rewrite(), propose_breakdown(),
-    │   │                            test_connection(), get_chat_model()
+    │   │                            test_connection(), get_chat_model(), generate_image(),
+    │   │                            design_poster() — see §4
     │   ├── gemini.py
     │   ├── openai.py
     │   ├── prompts.py              persona-keyed system prompts, rewrite prompt builder,
     │   │                            breakdown prompt builder (grounding contract), Jarvis's
-    │   │                            chatbot system prompt, profile-enhance prompts,
-    │   │                            shared AGENT_SAFETY_BOUNDARIES block
+    │   │                            chatbot system prompt, profile-enhance prompts, the SVG
+    │   │                            poster-spec design prompt, shared AGENT_SAFETY_BOUNDARIES block
+    │   ├── content_blocks.py       build_user_content() — the one place a multimodal chat
+    │   │                            HumanMessage is built (attachment blocks first, user text
+    │   │                            last); returns a plain str when there are no attachments so
+    │   │                            the no-attachment path can't regress — see §4/§6
+    │   ├── tokens.py               estimate_tokens() (already tolerated list content via its own
+    │   │                            _stringify_content; now also charges a flat per-image-block
+    │   │                            token estimate so compaction isn't fooled by image-heavy turns)
     │   ├── schema_utils.py          inline_refs() — flattens $defs/$ref for provider schemas;
     │   │                            see §2's breakdown_jobs note on why the breakdown schema
     │   │                            must stay non-recursive
-    │   └── registry.py             resolves a user's configured provider (purpose: extract|rewrite|chat)
+    │   └── registry.py             resolves a user's configured provider (purpose: extract|
+    │                                rewrite|chat|thumbnail_image|thumbnail_poster|search_answer)
     ├── agents/                    LangGraph orchestration — see §4
     │   ├── rewrite_graph.py        one-node StateGraph wrapping provider.rewrite()
     │   ├── chatbot_graph.py        Jarvis: per-request ReAct-style tool-calling graph — see §4
     │   ├── chat_tools.py           project_search, portfolio_analysis, github_search,
     │   │                            task_search, task_summary tools
     │   └── chat_app_guide.md       hand-maintained knowledge doc baked into Jarvis's system
-    │                                prompt — the only place platform-feature answers come from
+    │                                prompt — the only place platform-feature answers come from;
+    │                                also the registry app_features.py's guide_section entries
+    │                                are checked against, and where Jarvis's own attachment
+    │                                types/caps are documented
     ├── ingest/
-    │   └── extract.py             magic-byte sniff, pdfplumber/docx2python/mammoth, .doc reject
+    │   ├── extract.py             magic-byte sniff, pdfplumber/docx2python/mammoth, .doc reject
+    │   └── media_sniff.py          magic-byte sniff for images (JPEG/PNG/WEBP) and video (MP4
+    │                                `ftyp` brands, WebM EBML) — SVG is never accepted on upload,
+    │                                only ever backend-generated and served with a strict CSP
     ├── render/
     │   ├── docx.py                python-docx + html-for-docx
     │   └── pdf.py                 PdfRenderer protocol, Playwright backend
@@ -253,12 +308,73 @@ repo_suggestions
   unique(user_id, technology, repo_full_name)
                  -- one row per (user, technology, repo) ever suggested; also the no-repeat
                     log chat_tools.github_search checks before offering a repo — plan.md Part H
+
+project_media   -- metadata only; see project_media_blobs below for the bytes
+  id (uuid, pk)  user_id (fk -> users, cascade)  project_id (fk -> projects, cascade)
+  kind (enum: thumbnail | video)  origin (enum: uploaded | generated)
+  generator (nullable string: "image_model" | "svg_poster")  -- set only when origin=generated
+  filename  mime_type  size_bytes  sha256
+  created_at  updated_at
+  unique(project_id, kind)   -- "at most one of each" as a DB constraint, not an app-level
+                                 check — makes upload an idempotent PUT/replace rather than an
+                                 insert that can race under concurrent requests
+
+project_media_blobs
+  media_id (uuid, pk, fk -> project_media, cascade)  data (bytea)
+                 -- physically separate table from project_media, and deliberately NO
+                    relationship() between them: bytes are only ever reached through an
+                    explicit select(ProjectMediaBlob.data) or select(func.substring(...)),
+                    never a lazy/eager load off ProjectMedia — a stray selectinload here would
+                    pull up to 50MB into a project list request. ALTER COLUMN data SET STORAGE
+                    EXTERNAL (not the Postgres default EXTENDED) so substring() range reads
+                    don't have to decompress the whole value first — this is invisible in
+                    tests, since create_all() never emits it (§6/RESEARCH note: correct
+                    results, wrong performance, on a test DB)
+
+thumbnail_jobs   -- reuses the exact job_status enum from extraction_jobs, see §2 above
+  id (uuid, pk)  user_id (fk)  project_id (fk)  provider (enum: gemini | openai)
+  status (job_status)  media_id (fk -> project_media, ON DELETE SET NULL, nullable)
+  generator (nullable, mirrors project_media.generator once succeeded)
+  error_code (nullable)  error_message (nullable)
+  created_at  started_at  finished_at
+                 -- stage mapping is a label-only convention, not new enum values: parsing =
+                    assembling the prompt, extracting = calling the image model, structuring =
+                    designing the SVG poster (fallback path only) — adding real new stages
+                    would mean ALTER TYPE ... ADD VALUE plus a reaper update for identical UX,
+                    so the existing 4-stage stepper is reused as-is with different client copy
+
+chat_attachments   -- metadata only; a table, not a JSONB column on chat_messages (JSONB can't
+                       hold bytes; attachments exist BEFORE the message row does, on pre-upload;
+                       and they need their own identity for GET /chat/attachments/{id})
+  id (uuid, pk)  user_id (fk -> users, cascade)  session_id (fk -> chat_sessions, cascade)
+  message_id (fk -> chat_messages, ON DELETE SET NULL, nullable, indexed — replay selects by
+              this every turn)
+  kind (enum: image | document)  filename  mime_type  size_bytes  sha256
+  extracted_text (nullable, capped ~100k chars)  text_truncated (bool)
+  created_at
+                 -- DELETE is a 409 once message_id IS NOT NULL: deleting an attachment a
+                    persisted message replays would corrupt that message's history
+
+chat_attachment_blobs
+  attachment_id (uuid, pk, fk -> chat_attachments, cascade)  data (bytea, nullable)
+                 -- nullable because a DOCUMENT attachment stores only extracted_text on the
+                    metadata row, not raw bytes; only IMAGE attachments populate this. Same
+                    SET STORAGE EXTERNAL treatment as project_media_blobs, same no-relationship
+                    rule, and replay is bounded (_MAX_REPLAYED_IMAGES = 4 — older images in a
+                    long history become text placeholders instead of being loaded, since 5MB
+                    times a 10-message window is 250MB per request otherwise)
 ```
 
 Storage for uploaded files and rendered exports: **local disk** under
 `DATA_DIR/{uploads,exports}/{user_id}/{uuid}{ext}` — never the client-supplied filename
 on disk, to close the path-traversal hole; the original filename is kept only as a DB
-column for display/download headers.
+column for display/download headers. **Project media and chat-attachment images are the one
+exception**: those live in Postgres `bytea` (metadata/blob table split, `STORAGE EXTERNAL`),
+not disk — the deliberate tradeoff is documented in the dashboard/chat/media plan's Risk #2:
+every project video lands in `pg_dump`/WAL, but the metadata/bytes split keeps
+`pg_dump --exclude-table='*_blobs'` viable, and it sidesteps needing a second storage backend
+(S3/local volume) and its own auth/cleanup story for what is, at a 50MB video cap, a bounded
+amount of data.
 
 ## 3. REST API surface
 
@@ -373,6 +489,53 @@ POST   /breakdown-jobs/{id}/accept  {items: [{ref, title, description, priority,
                                 (a duplicate ref is skipped, not re-created) so a double-submit
                                 or a refresh mid-accept can't create duplicate tasks
 POST   /breakdown-jobs/{id}/dismiss  {refs: [ref]}                      -> BreakdownJobOut
+
+PUT    /projects/{id}/thumbnail     multipart: file                     -> ProjectMediaOut
+PUT    /projects/{id}/video         multipart: file                     -> ProjectMediaOut
+                             -- PUT not POST: the unique(project_id, kind) constraint makes
+                                upload an idempotent replace. Capped reads (_read_capped, 1MiB
+                                chunks so an oversized body 413s mid-stream, not after it's
+                                fully resident); video uploads additionally gated by
+                                asyncio.Semaphore(max_concurrent_video_uploads)
+DELETE /projects/{id}/thumbnail     |  /video                           -> 204 (idempotent)
+GET    /projects/{id}/thumbnail                                         -> bytes, ETag/304,
+                                        image/svg+xml + nosniff + a locked-down CSP if generated
+GET    /projects/{id}/video                                             -> 200/206/304/416,
+                                        Accept-Ranges: bytes — see §6 on the streaming session
+POST   /projects/{id}/thumbnail/generate                                -> 201 {job_id}
+                             -- has_sufficient_context() runs synchronously here, before the
+                                job row is created: a pure DB predicate with zero LLM cost, so
+                                an insufficient project gets an inline 422
+                                (INSUFFICIENT_PROJECT_CONTEXT) instead of a job that instantly
+                                fails behind a spinner. Re-checked inside the job too, since the
+                                project can be edited between enqueue and run
+GET    /thumbnail-jobs/{id}                                              -> ThumbnailJobOut
+
+GET    /search              ?q=&limit_per_group=                        -> {groups: [{kind,
+                                hits: [SearchHit]}]}
+                             -- pure SQL (ILIKE), ~5ms, no provider dependency — must keep
+                                working for a user with no AI provider configured
+POST   /search/ask          {q}                                          -> {answer, hits}
+                             -- separate from GET /search on purpose: this one call is 2-8s,
+                                needs a configured provider (422 PROVIDER_NOT_CONFIGURED if
+                                not), and is a single grounded call with no tools/session/
+                                history — grounded in the top ~8 fast-search hits plus
+                                chat_app_guide.md's text, never unified with the Jarvis graph
+
+GET    /dashboard/summary                                                -> DashboardSummary
+                             -- one endpoint, not three, so the dashboard paints once:
+                                total/current project counts, ranked technologies (derived,
+                                counted — kept distinct from profile skills, which are
+                                self-declared claims), project summaries incl. thumbnail/video refs
+
+POST   /chat/sessions/{id}/attachments   multipart: file                 -> ChatAttachmentOut
+                             -- pre-upload, then the message body carries attachment_ids
+                                (max 5); images cap at max_chat_image_size_mb, documents run
+                                through the same ingest() pipeline documents.py uses (so
+                                DOCX/TXT/code files work for free; .xlsx 415s with a pointer to
+                                the Brag Document export instead)
+DELETE /chat/attachments/{id}                                            -> 204, or 409 once
+                                the attachment is already referenced by a persisted message
 ```
 
 `POST /documents` returning immediately with a job id (rather than blocking on
@@ -457,7 +620,30 @@ class LLMProvider(Protocol):
         """Underlying LangChain chat model for open-ended conversation + tool-calling +
         streaming — no structured-output binding. The one seam where Jarvis reaches below
         the extract()/rewrite() abstraction."""
+    async def generate_image(self, prompt: str, aspect_ratio: str) -> GeneratedImage:
+        """Raster thumbnail attempt. Raises a ProviderError with code
+        IMAGE_GENERATION_UNSUPPORTED / NOT_FOUND / PROVIDER_BAD_REQUEST for the caller to
+        fall through to the SVG poster path — PROVIDER_AUTH/RATE_LIMITED propagate and fail
+        the job instead, so a real credential/quota problem is never silently masked."""
+    async def design_poster(self, ctx: dict, json_schema: dict, *, persona: AgentPersona) -> dict:
+        """Structured-output call producing a small poster spec (palette/motif/headline
+        treatment) for the deterministic SVG fallback renderer — see thumbnail_service.py
+        and poster_renderer.py."""
 ```
+
+**Thumbnail image generation is the one deliberate exception to "orchestrate through
+LangChain."** `GeminiProvider.generate_image()` calls the native `google-genai` client
+directly (`client.aio.models.generate_images`) rather than through
+`langchain-google-genai` — following existing precedent, not introducing a new one:
+`test_connection()` already drops to the native client because LangChain's Gemini wrapper
+doesn't expose it, and `_classify_error()` already handles native `google.genai` error
+types, so error classification (and the `IMAGE_GENERATION_UNSUPPORTED`/`NOT_FOUND` →
+SVG-fallback mapping above) comes for free. The image model id lives in **settings**
+(`gemini_image_model`, empty string hard-disables the raster path and forces the SVG route
+unconditionally), not in `providers/catalog.py` — that catalog feeds the text-model
+dropdown only. OpenAI has no `generate_image`/`design_poster` implementation; image
+thumbnails are Gemini-only today, with the SVG poster as the universal fallback regardless
+of chat provider.
 
 `persona` (`models/user.AgentPersona` — `business_analyst` | `technical_developer`, the
 `users.agent_persona` column) selects which system prompt in `providers/prompts.py`
@@ -649,9 +835,9 @@ settings = {
     ],
     "concurrency": 4,
     "cron_jobs": [
-        CronJob(reap_stale_jobs, cron="*/5 * * * *"),  # sweeps BOTH extraction_jobs and
-                                       # breakdown_jobs in the same tick — one crashed-worker
-                                       # story, not two separate reapers
+        CronJob(reap_stale_jobs, cron="*/5 * * * *"),  # sweeps extraction_jobs,
+                                       # breakdown_jobs AND thumbnail_jobs in the same tick —
+                                       # one crashed-worker story, not three separate reapers
         CronJob(refresh_stale_suggestions, cron="*/20 * * * *"),  # makes real outbound
                                        # GitHub calls, so a longer interval than the
                                        # pure-DB-sweep reaper above — see plan.md Part H
@@ -712,6 +898,15 @@ and `started_at < now() - 10min` as `failed/TIMEOUT` so the frontend's poll alwa
 terminates — see plan.md Part G for the equivalent staleness handling on the newer
 suggestion-recompute path (`refresh_stale_suggestions`, every 20 min, batched and
 rate-limit-aware rather than a fixed timeout).
+
+**Video/blob streaming is not a queued job, but shares this section's "session outlives the
+request" lesson.** `project_media_service.iter_blob()` opens its **own** session via
+`async_session_factory`, never the request's `Depends(get_db)` session — the generator body
+runs *after* the route handler returns, while `StreamingResponse` drains it chunk by chunk,
+so a request-scoped session's teardown is not guaranteed to still be open by then. This is
+invisible under `httpx.ASGITransport`, which drains a streaming response eagerly before a
+test can observe partial state — the Range test suite reads via `client.stream()` in pieces
+specifically to catch a regression here.
 
 ## 7. Export
 
@@ -783,6 +978,9 @@ interfaces so the choice is swappable per-deployment:
 | **M15** *(delivered)* | Task foundation: `tasks` table (parent/child, depth capped at 1), `core/ownership.py`'s shared `require_owned`/`owned` seam adopted repo-wide, full CRUD + bulk-create + reorder, first backend test suite (17 tests) | curl create/list/reorder/bulk; cross-user access 404s; a rejected reorder leaves `position` unchanged. `new-feature.md` Feature 1 |
 | **M16** *(delivered)* | AI work breakdown (flagship): `breakdown_jobs` table sharing `extraction_jobs`' `job_status` type, persona-keyed prompts with a per-item verbatim-quote grounding contract, `normalize_breakdown()` (repairs rather than rejects any malformed model output), review-and-accept UI with idempotent partial-accept and a promotion-warning for orphaned subtasks | Upload a spec → propose a task tree → edit and accept a subset → tasks appear with an AI badge; double-submit accept creates nothing extra; cancel/dismiss work; a stale job is reaped. 32 new tests. `new-feature.md` Feature 2 |
 | **M17** *(delivered)* | Jarvis becomes work-aware: `task_search`/`task_summary` tools (read-only, same `user_id`-closure pattern as the existing three) | Ask Jarvis "what's blocked on X" or "what's my workload" and get a tool-grounded answer citing real tasks. `new-feature.md` Feature 3 |
+| **M18** *(delivered)* | Project media: `project_media`/`project_media_blobs` tables (Postgres bytea, `STORAGE EXTERNAL`), upload/replace/delete, Range-streamed video (200/206/304/416), thumbnail generation as an async job (Gemini image model → deterministic SVG-poster fallback, code-gated by error type), `has_sufficient_context()` precondition | Upload a video, scrub it mid-file (confirms Range works end to end); generate a thumbnail on an empty project (422, zero job rows) then on a filled one (job → image or poster); replace a thumbnail and confirm exactly one metadata + one blob row remain. Dashboard/chat/media plan Parts 0–3 |
+| **M19** *(delivered)* | Search + dashboard: `GET /search` (fast ILIKE across projects/technologies/tasks/`app_features.py`'s hand-written registry), `POST /search/ask` (one grounded LLM call, no tools/session), `GET /dashboard/summary` (one query pass; technologies kept distinct from profile skills) | Search a technology name and a feature keyword, confirm cross-user isolation on every group; ask `/search/ask` a platform-feature question and get an answer grounded in the fast-search hits + `chat_app_guide.md`; hit `/dashboard/summary` with zero projects and confirm no error. Dashboard/chat/media plan Part 4 |
+| **M20** *(delivered)* | Chat attachments: `chat_attachments`/`chat_attachment_blobs` tables, pre-upload-then-reference-by-id flow, images as true multimodal content blocks (`content_blocks.build_user_content()`) and documents extracted via the existing `ingest()` pipeline, bounded replay (`_MAX_REPLAYED_IMAGES = 4`), `.xlsx` rejected with a pointer to Brag Documents, 409 on deleting an already-referenced attachment | Attach a screenshot and a PDF to one message, send with empty text, reload the session and confirm the image still renders from history; attempt to delete an attachment already on a persisted message → 409; upload an `.xlsx` → 415 naming Brag Documents. Dashboard/chat/media plan Part 5 |
 
 M0–M2 sequential. M3 can run in parallel with M4. M5 must precede M6/M7. M8 is independent
 of M6/M7 (it only needs a provider, not the job queue) and can start once M3 is done.
@@ -791,4 +989,9 @@ not M6–M10. M12 depends only on M8's rewrite machinery. M13/M14 both extend M1
 built after it, once real usage surfaced the need for them. M15 is independent of M6–M14
 (tasks have no AI surface of their own). M16 depends on M15 (it creates `Task` rows) and
 reuses M5's job-queue infrastructure and M6's provider abstraction; M17 depends on M15 and
-M11 (it adds tools to Jarvis's existing tool-calling loop).
+M11 (it adds tools to Jarvis's existing tool-calling loop). M18 reuses M5's job-queue
+infrastructure and M6's provider abstraction the same way M16 did, but is otherwise
+independent of M11–M17. M19 is pure-SQL/read-only and depends only on M2/M15 (projects,
+tasks) existing to search over; its `/ask` endpoint needs a working provider (M3) but no
+job queue. M20 extends M11's chat turn machinery and reuses M5's ingest pipeline from M4/M6,
+independent of M12–M19.

@@ -59,6 +59,42 @@ class BragDocumentInput(BaseModel):
     completed_tasks: list[dict]
 
 
+class ThumbnailPromptInput(BaseModel):
+    """Grounding context for a project-thumbnail generation call — either a saved
+    project's own fields, or (create-mode, per the product decision to auto-save first)
+    the same shape built from the just-saved project. Plain strings only, no bytes: a
+    thumbnail is generated from what the project *says* about itself, never from an
+    uploaded document."""
+
+    name: str
+    role: str
+    technologies: list[str] = []
+    description_text: str = ""
+    responsibilities_text: str = ""
+
+
+class FAQPromptInput(BaseModel):
+    """Grounding context for FAQ generation — same shape as ThumbnailPromptInput (a
+    project's own name/role/technologies/description/responsibilities), kept as its own
+    type rather than reused so the two features' input contracts can diverge
+    independently later without a shared-type coupling."""
+
+    name: str
+    role: str
+    technologies: list[str] = []
+    description_text: str = ""
+    responsibilities_text: str = ""
+
+
+class GeneratedImage(BaseModel):
+    """A raster image OR a rendered SVG poster — both flow through the same
+    services/project_media_service.replace_media call, distinguished only by
+    mime_type/generator. See services/thumbnail_service.py."""
+
+    data: bytes
+    mime_type: str
+
+
 class ProviderError(Exception):
     """Raised by a provider adapter; extraction_service maps `code` onto the job's
     error_code / the frontend's error taxonomy (frontend/DESIGN.md §4.1)."""
@@ -119,7 +155,43 @@ class LLMProvider(Protocol):
         larger-than-extraction structured-output calls."""
         ...
 
+    async def generate_image(self, prompt: str, *, aspect_ratio: str = "16:9") -> GeneratedImage:
+        """Text-to-image, for AI project thumbnails (services/thumbnail_service.py).
+        Raises ProviderError("IMAGE_GENERATION_UNSUPPORTED", ...) when this provider has
+        no image model configured/available (OpenAIProvider always does today) or when
+        the configured model id itself isn't available for this account/tier — either
+        way, that specific code is what thumbnail_service treats as "fall back to the
+        deterministic SVG poster" rather than failing the job outright."""
+        ...
+
+    async def design_poster(
+        self, ctx: ThumbnailPromptInput, json_schema: dict, *, persona: AgentPersona
+    ) -> dict:
+        """The SVG-poster fallback's text half: return a raw dict matching json_schema
+        (schemas.thumbnail.LLMPosterSpec) — services/poster_renderer.normalize_poster_spec
+        repairs and validates it, so this method itself never needs to. Same call shape as
+        propose_breakdown (schema flattened via schema_utils.inline_refs, JSON-mode/
+        response_schema, same error classification), since both are single-shot
+        structured-output calls with no document input."""
+        ...
+
+    async def generate_faq(self, ctx: FAQPromptInput, json_schema: dict, *, persona: AgentPersona) -> dict:
+        """Return a raw dict matching json_schema (schemas.faq.LLMFAQResult) —
+        services/faq_service.normalize_faq() repairs and validates it, so this method
+        itself never needs to. Same call shape as design_poster/propose_breakdown (schema
+        flattened via schema_utils.inline_refs, JSON-mode/response_schema, same error
+        classification), since this is also a single-shot structured-output call with no
+        document input."""
+        ...
+
     async def test_connection(self) -> ConnectionStatus: ...
+
+    @property
+    def model(self) -> str:
+        """The configured model name — lets a caller that only has an LLMProvider
+        (e.g. chat_service tagging a usage_service.record_usage call) label usage rows
+        without reaching into a private attribute."""
+        ...
 
     def get_chat_model(self) -> BaseChatModel:
         """The underlying LangChain chat model, configured for open-ended conversation +

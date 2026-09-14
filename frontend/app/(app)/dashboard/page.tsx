@@ -1,22 +1,34 @@
 import Link from "next/link";
-import { Button } from "@/components/ui/button";
+import { AppSearch } from "@/components/dashboard/app-search";
+import { ProjectListCompact } from "@/components/dashboard/project-list-compact";
 import { RecentConversationsCard } from "@/components/dashboard/recent-conversations-card";
+import { SkillsSummaryCard } from "@/components/dashboard/skills-summary-card";
 import { SuggestedReposCard } from "@/components/dashboard/suggested-repos-card";
-import { ProjectCard } from "@/components/projects/project-card";
+import { Button } from "@/components/ui/button";
 import type { ChatSessionListResponse } from "@/lib/chat";
 import { serverApiFetch } from "@/lib/server-api";
 import type { GithubSuggestion } from "@/lib/suggestions";
-import type { ProjectListResponse } from "@/lib/types";
+import type { DashboardSummary } from "@/lib/types";
 
 export default async function DashboardPage() {
-  let data: ProjectListResponse = { items: [], total: 0 };
+  let summary: DashboardSummary = {
+    total_projects: 0,
+    current_projects: 0,
+    technologies: [],
+    distinct_technology_count: 0,
+    primary_skills: [],
+    secondary_skills: [],
+    projects: [],
+  };
   let loadError: string | null = null;
   try {
-    data = await serverApiFetch<ProjectListResponse>("projects?page=1&page_size=12");
+    summary = await serverApiFetch<DashboardSummary>("dashboard/summary");
   } catch {
     loadError = "Couldn't reach the API — is the backend running?";
   }
 
+  // Same per-section try/catch convention as the summary fetch above — one dead
+  // endpoint must never blank the whole dashboard.
   let chatData: ChatSessionListResponse = { items: [], total: 0 };
   try {
     chatData = await serverApiFetch<ChatSessionListResponse>("chat/sessions?page=1&page_size=5&sort=desc");
@@ -36,30 +48,31 @@ export default async function DashboardPage() {
       <div className="mb-6 flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold">Dashboard</h1>
-          <p className="text-sm text-muted">{data.total} project{data.total === 1 ? "" : "s"}</p>
+          <p className="text-sm text-muted">
+            {summary.total_projects} project{summary.total_projects === 1 ? "" : "s"}
+          </p>
         </div>
         <Link href="/projects/new">
           <Button>Add New Project</Button>
         </Link>
       </div>
 
-      {loadError && <p className="text-sm text-danger">{loadError}</p>}
+      {loadError && <p className="mb-4 text-sm text-danger">{loadError}</p>}
 
-      <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        <RecentConversationsCard sessions={chatData.items} />
-        <SuggestedReposCard initialSuggestions={suggestions} />
+      <div className="mb-6">
+        <AppSearch />
       </div>
 
-      {!loadError && data.items.length === 0 && (
-        <p className="text-sm text-muted">
-          No projects yet. <Link href="/projects/new" className="text-accent hover:underline">Add your first one</Link>.
-        </p>
-      )}
+      <div className="mb-6">
+        <SkillsSummaryCard technologies={summary.technologies} />
+      </div>
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {data.items.map((project) => (
-          <ProjectCard key={project.id} project={project} />
-        ))}
+      <div className="grid grid-cols-1 gap-4 @4xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+        <ProjectListCompact projects={summary.projects} total={summary.total_projects} />
+        <div className="space-y-4">
+          <RecentConversationsCard sessions={chatData.items} />
+          <SuggestedReposCard initialSuggestions={suggestions} />
+        </div>
       </div>
     </div>
   );
